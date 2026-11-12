@@ -1,4 +1,4 @@
-export const API_BASE = "http://localhost:8000"
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 /**
  * Safe fetch with AbortController timeout to prevent UI hanging indefinitely.
@@ -289,6 +289,38 @@ export async function verifyWorkerMeId(meId: string) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || `Worker ME-ID '${meId}' is not registered in PostgreSQL.`)
+  }
+  return res.json()
+}
+
+/**
+ * Create a PayPal Escrow order for a specific milestone.
+ */
+export async function createMilestonePayPalOrder(milestoneId: number | string, amount: number) {
+  const res = await fetch(`${API_BASE}/api/milestones/${milestoneId}/create-order`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ amount }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "Failed to initialize PayPal escrow order.")
+  }
+  return res.json()
+}
+
+/**
+ * Capture an approved PayPal Escrow order for a specific milestone.
+ */
+export async function captureMilestonePayPalOrder(milestoneId: number | string, orderID: string) {
+  const res = await fetch(`${API_BASE}/api/milestones/${milestoneId}/capture-order`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ order_id: orderID, orderID }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "Failed to capture PayPal escrow order.")
   }
   return res.json()
 }

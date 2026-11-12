@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import Auth from "./Auth"
+import PayPalFundButton from "./components/PayPalFundButton"
 import { AuthProvider, useAuth, deriveClientIdentity, type UserAccount } from "./AuthContext"
 import {
   type User,
@@ -1737,6 +1738,7 @@ function Studio({
   const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+  const [activeContract, setActiveContract] = useState<BountyData | null>(null)
 
   const handleValidateWorkerMeId = async (idToValidate: string) => {
     const clean = idToValidate.trim()
@@ -1828,26 +1830,29 @@ function Studio({
     setManualMilestones((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const handleFundContract = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const createContractRecord = async (): Promise<BountyData> => {
     setErrorMessage(null)
 
     if (!title.trim()) {
-      setErrorMessage("Please enter a contract title.")
-      return
+      const msg = "Please enter a contract title."
+      setErrorMessage(msg)
+      throw new Error(msg)
     }
     const budgetNum = Number(totalBudget)
     if (!budgetNum || budgetNum <= 0) {
-      setErrorMessage("Please enter a valid total escrow budget (USD).")
-      return
+      const msg = "Please enter a valid total escrow budget (USD)."
+      setErrorMessage(msg)
+      throw new Error(msg)
     }
     if (!workerEmail.trim() || !workerEmail.includes("@")) {
-      setErrorMessage("Please enter a valid worker email address.")
-      return
+      const msg = "Please enter a valid worker email address."
+      setErrorMessage(msg)
+      throw new Error(msg)
     }
     if (!workerMeId.trim()) {
-      setErrorMessage("Please enter the worker ME-ID (e.g. ME-8492-X).")
-      return
+      const msg = "Please enter the worker ME-ID (e.g. ME-8492-X)."
+      setErrorMessage(msg)
+      throw new Error(msg)
     }
 
     try {
@@ -1856,8 +1861,9 @@ function Studio({
       if (typeof window !== "undefined" && (window as any).__E2E_MODE__) {
         // E2E testing mock verification
       } else {
-        setErrorMessage(verErr.message || `Worker ME-ID '${workerMeId}' is not registered in PostgreSQL.`)
-        return
+        const msg = verErr.message || `Worker ME-ID '${workerMeId}' is not registered in PostgreSQL.`
+        setErrorMessage(msg)
+        throw new Error(msg)
       }
     }
 
@@ -1869,12 +1875,13 @@ function Studio({
             .join("\n\n")
 
     if (!finalCriteria.trim()) {
-      setErrorMessage("Please enter deliverables or acceptance criteria.")
-      return
+      const msg = "Please enter deliverables or acceptance criteria."
+      setErrorMessage(msg)
+      throw new Error(msg)
     }
 
+    setSubmitting(true)
     try {
-      setSubmitting(true)
       const isDonation = purpose === "charity"
 
       const finalMilestones =
@@ -1959,18 +1966,57 @@ function Studio({
         })
         if (res && res.id) {
           createdContractData.id = res.id
+          if (Array.isArray(res.milestones) && res.milestones.length > 0) {
+            createdContractData.milestones = res.milestones
+          }
         }
       } catch (backendErr) {
         console.warn("[Studio] Backend createBounty fallback:", backendErr)
       }
 
+      setActiveContract(createdContractData)
+      return createdContractData
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const ensureContractMilestoneId = async (): Promise<number | string> => {
+    if (activeContract) {
+      return activeContract.milestones?.[0]?.id || activeContract.id
+    }
+    const created = await createContractRecord()
+    return created.milestones?.[0]?.id || created.id
+  }
+
+  const handleContractFunded = () => {
+    const fundedContract = activeContract
+    if (fundedContract && typeof window !== "undefined" && currentEmail) {
+      try {
+        const key = `escrow_contracts_${currentEmail}`
+        const prev = JSON.parse(localStorage.getItem(key) || "[]")
+        localStorage.setItem(key, JSON.stringify([fundedContract, ...prev]))
+      } catch (e) {
+        console.warn("Could not cache contract to storage:", e)
+      }
+    }
+    setSuccess(true)
+    setTimeout(() => {
+      onContractCreated(fundedContract || undefined)
+    }, 1200)
+  }
+
+  const handleFundContract = async (e: React.FormEvent) => {
+    e.preventDefault()
+    try {
+      const createdContractData = await createContractRecord()
       if (typeof window !== "undefined" && currentEmail) {
         try {
           const key = `escrow_contracts_${currentEmail}`
           const prev = JSON.parse(localStorage.getItem(key) || "[]")
           localStorage.setItem(key, JSON.stringify([createdContractData, ...prev]))
-        } catch (e) {
-          console.warn("Could not cache contract to storage:", e)
+        } catch (err) {
+          console.warn("Could not cache contract to storage:", err)
         }
       }
 
@@ -1981,7 +2027,6 @@ function Studio({
     } catch (err: any) {
       console.error("Failed to create contract:", err)
       setErrorMessage(err.message || "Failed to initialize and fund escrow contract.")
-      setSubmitting(false)
     }
   }
 
@@ -2358,30 +2403,15 @@ function Studio({
             <span>Note: The worker&apos;s submission method (GitHub URL vs Physical Receipts) is automatically locked based on your selection in Section 01.</span>
           </p>
 
-          {/* Action: Solid neon-green button */}
+          {/* Action: Live PayPal Escrow Checkout */}
           <div className="form-actions-bar">
-            <button
-              type="submit"
-              className="fund-escrow-btn"
+            <PayPalFundButton
+              milestoneId={activeContract?.milestones?.[0]?.id || activeContract?.id || 1}
+              amount={Number(totalBudget) || 0}
+              onEnsureMilestoneId={ensureContractMilestoneId}
+              onFunded={handleContractFunded}
               disabled={submitting || success}
-            >
-              {submitting ? (
-                <>
-                  <Icon name="refresh" size={16} />
-                  Locking Escrow Funds...
-                </>
-              ) : success ? (
-                <>
-                  <Icon name="check" size={16} />
-                  Escrow Contract Funded
-                </>
-              ) : (
-                <>
-                  <Icon name="lock" size={16} />
-                  Fund Escrow Contract
-                </>
-              )}
-            </button>
+            />
             <div className="fund-security-notice">
               <Icon name="shield" size={13} />
               <span>

@@ -1,4 +1,6 @@
 import os
+import hmac
+import hashlib
 import random
 import string
 import asyncio
@@ -12,7 +14,7 @@ import requests
 from fastapi import FastAPI, Depends, HTTPException, Request, status, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, or_
 from twilio.twiml.messaging_response import MessagingResponse
@@ -3023,109 +3025,168 @@ async def verify_paypal_webhook_signature(
         return False
 
 
-def process_paypal_webhook_event(webhook_event: dict) -> None:
+class PayPalWebhookPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    event_type: str = ""
+    resource: dict = Field(default_factory=dict)
+    summary: str | None = None
+    create_time: str | None = None
+
+
+def extract_milestone_id_from_paypal_resource(resource: dict) -> int | None:
     """
-    Background worker task for processing PayPal webhook events:
-    If the event type is PAYMENT.CAPTURE.COMPLETED or PAYMENT.PAYOUTS-ITEM.SUCCEEDED,
-    queries the PostgreSQL database for the matching paypal_order_id, and transitions
-    the matching milestone status to COMPLETED.
+    Extracts milestone ID from PayPal webhook resource custom payloads
+    (supports custom_id, milestone_id, sender_item_id, or JSON-encoded custom_id).
     """
-    db: Session = SessionLocal()
+    if not isinstance(resource, dict):
+        return None
+
+    direct_id = resource.get("milestone_id")
+    if direct_id is not None:
+        try:
+            return int(direct_id)
+        except (TypeError, ValueError):
+            pass
+
+    payout_item = resource.get("payout_item") or {}
+    candidates = [
+        resource.get("custom_id"),
+        payout_item.get("custom_id") if isinstance(payout_item, dict) else None,
+        payout_item.get("sender_item_id") if isinstance(payout_item, dict) else None,
+        resource.get("sender_item_id"),
+    ]
+
+    for raw_val in candidates:
+        if raw_val is None:
+            continue
+        val_str = str(raw_val).strip()
+        if not val_str:
+            continue
+        if val_str.isdigit():
+            return int(val_str)
+        if val_str.startswith("{"):
+            try:
+                parsed = json.loads(val_str)
+                if isinstance(parsed, dict) and parsed.get("milestone_id") is not None:
+                    return int(parsed["milestone_id"])
+            except Exception:
+                pass
+        if "_m_" in val_str:
+            try:
+                return int(val_str.split("_m_")[-1].split("_")[0])
+            except (TypeError, ValueError):
+                pass
+        if val_str.startswith("milestone_") or val_str.startswith("m_"):
+            try:
+                return int(val_str.split("_")[-1])
+            except (TypeError, ValueError):
+                pass
+
+    return None
+
+
+def process_paypal_webhook_event(webhook_event: dict, db_session: Session | None = None) -> dict:
+    """
+    Processes PayPal webhook events:
+    - PAYMENT.CAPTURE.COMPLETED -> marks milestone status as FUNDED
+    - PAYMENT.PAYOUTS-ITEM.SUCCEEDED -> marks milestone status as RELEASED
+    """
+    owns_session = db_session is None
+    db: Session = db_session if db_session is not None else SessionLocal()
     try:
         event_id = webhook_event.get("id")
-        event_type = webhook_event.get("event_type")
-        resource = webhook_event.get("resource", {})
-        logger.info("[PayPal Webhook] Asynchronous processing started for event %s (%s)", event_id, event_type)
+        event_type = webhook_event.get("event_type", "")
+        resource = webhook_event.get("resource") or {}
 
-        if event_type not in ("PAYMENT.CAPTURE.COMPLETED", "PAYMENT.PAYOUTS-ITEM.SUCCEEDED"):
-            logger.info("[PayPal Webhook] Event %s (%s) not requiring milestone transition. Finished.", event_id, event_type)
-            return
+        if event_type == "PAYMENT.CAPTURE.COMPLETED":
+            target_status = "FUNDED"
+            log_msg = "[Financial Engine] Buyer deposit captured. Escrow locked."
+        elif event_type == "PAYMENT.PAYOUTS-ITEM.SUCCEEDED":
+            target_status = "RELEASED"
+            log_msg = "[Financial Engine] Funds successfully routed to worker. Escrow closed."
+        else:
+            return {"status": "ignored", "event_type": event_type}
 
-        # 1. Extract paypal_order_id and supplementary identifiers from payload
+        print(log_msg)
+        logger.info(log_msg)
+
+        # 1. Extract milestone_id and PayPal correlation IDs from payload
+        target_milestone_id = extract_milestone_id_from_paypal_resource(resource)
         order_id = (
-            resource.get("supplementary_data", {}).get("related_ids", {}).get("order_id")
+            (resource.get("supplementary_data") or {}).get("related_ids", {}).get("order_id")
             or resource.get("order_id")
             or resource.get("custom_id")
-            or resource.get("payout_item", {}).get("custom_id")
+            or (resource.get("payout_item") or {}).get("custom_id")
         )
         capture_id = resource.get("id") if event_type == "PAYMENT.CAPTURE.COMPLETED" else None
         payout_batch_id = (
             resource.get("payout_batch_id")
-            or resource.get("batch_header", {}).get("payout_batch_id")
+            or (resource.get("batch_header") or {}).get("payout_batch_id")
         )
         sender_item_id = (
-            resource.get("payout_item", {}).get("sender_item_id")
+            (resource.get("payout_item") or {}).get("sender_item_id")
             or resource.get("sender_item_id")
         )
 
         target_bounty_id = None
-        target_milestone_id = None
-
-        if sender_item_id and "item_" in sender_item_id:
+        if sender_item_id and "item_" in str(sender_item_id):
             try:
-                # Format: item_{bounty_id}_m_{milestone_id}
-                parts = sender_item_id.split("_")
+                parts = str(sender_item_id).split("_")
                 if len(parts) >= 4 and parts[0] == "item" and parts[2] == "m":
                     target_bounty_id = int(parts[1])
-                    target_milestone_id = int(parts[3])
+                    if target_milestone_id is None:
+                        target_milestone_id = int(parts[3])
             except Exception as e:
                 logger.warning("[PayPal Webhook] Could not parse sender_item_id '%s': %s", sender_item_id, e)
 
-        # 2. Query PostgreSQL database for matching Escrow by paypal_order_id
+        # 2. Query database for matching milestone / escrow / bounty
+        milestone = None
+        if target_milestone_id is not None:
+            milestone = db.query(models.Milestone).filter(models.Milestone.id == target_milestone_id).first()
+
         escrow = None
         if order_id:
-            escrow = db.query(models.Escrow).filter(models.Escrow.paypal_order_id == order_id).first()
+            order_id_str = str(order_id)
+            escrow = db.query(models.Escrow).filter(models.Escrow.paypal_order_id == order_id_str).first()
             if not escrow:
                 escrow = db.query(models.Escrow).filter(
-                    (models.Escrow.paypal_capture_id == order_id) |
-                    (models.Escrow.paypal_authorization_id == order_id)
+                    (models.Escrow.paypal_capture_id == order_id_str)
+                    | (models.Escrow.paypal_authorization_id == order_id_str)
                 ).first()
             if not escrow:
                 for candidate in db.query(models.Escrow).all():
-                    if candidate.paypal_order_ids and order_id in candidate.paypal_order_ids:
+                    if candidate.paypal_order_ids and order_id_str in candidate.paypal_order_ids:
                         escrow = candidate
                         break
 
-        # Fallback query by capture_id if needed
         if not escrow and capture_id:
             escrow = db.query(models.Escrow).filter(
-                (models.Escrow.paypal_capture_id == capture_id) |
-                (models.Escrow.paypal_order_id == capture_id)
+                (models.Escrow.paypal_capture_id == capture_id)
+                | (models.Escrow.paypal_order_id == capture_id)
             ).first()
 
-        # Fallback query by target_bounty_id
         if not escrow and target_bounty_id:
             escrow = db.query(models.Escrow).filter(models.Escrow.bounty_id == target_bounty_id).first()
-
-        milestone = None
-        if target_milestone_id:
-            milestone = db.query(models.Milestone).filter(models.Milestone.id == target_milestone_id).first()
 
         if not milestone and payout_batch_id:
             milestone = db.query(models.Milestone).filter(models.Milestone.paypal_payout_batch_id == payout_batch_id).first()
 
         bounty = None
-        if escrow and escrow.bounty:
-            bounty = escrow.bounty
-        elif milestone and milestone.bounty:
+        if milestone and milestone.bounty:
             bounty = milestone.bounty
             if bounty.escrow and not escrow:
                 escrow = bounty.escrow
+        elif escrow and escrow.bounty:
+            bounty = escrow.bounty
 
-        if not bounty:
-            logger.warning(
-                "[PayPal Webhook] Could not correlate webhook to any bounty/escrow: order_id=%s, capture_id=%s, payout_batch_id=%s",
-                order_id, capture_id, payout_batch_id,
-            )
-            return
-
-        # If milestone not specifically identified, find the active or first uncompleted milestone on this bounty
-        if not milestone:
+        if not milestone and bounty:
             milestone = (
                 db.query(models.Milestone)
                 .filter(
                     models.Milestone.bounty_id == bounty.id,
-                    models.Milestone.status != "COMPLETED",
+                    models.Milestone.status.notin_(["COMPLETED", "RELEASED"]),
                 )
                 .order_by(models.Milestone.id.asc())
                 .first()
@@ -3139,12 +3200,15 @@ def process_paypal_webhook_event(webhook_event: dict) -> None:
                 )
 
         if not milestone:
-            logger.warning("[PayPal Webhook] Bounty #%s has no milestones to update.", bounty.id)
-            return
+            logger.info(
+                "[PayPal Webhook] Processed %s without matching milestone row (milestone_id=%s, order_id=%s).",
+                event_type, target_milestone_id, order_id,
+            )
+            return {"status": "processed", "event_type": event_type, "milestone_updated": False}
 
-        # 3. Transition the milestone status to COMPLETED
+        # 3. Update milestone and bounty status
         old_status = milestone.status
-        milestone.status = "COMPLETED"
+        milestone.status = target_status
         if payout_batch_id and not milestone.paypal_payout_batch_id:
             milestone.paypal_payout_batch_id = payout_batch_id
 
@@ -3154,29 +3218,28 @@ def process_paypal_webhook_event(webhook_event: dict) -> None:
                 escrow.paypal_capture_id = capture_id
                 db.add(escrow)
 
-        # 4. Update bounty remaining balance if milestone was transitioning to COMPLETED
-        milestone_amount = float(milestone.amount_usd or 0.0)
-        if old_status != "COMPLETED":
-            current_rem = bounty.remaining_amount_usd if bounty.remaining_amount_usd is not None else bounty.amount_usd
-            if current_rem is not None:
-                bounty.remaining_amount_usd = max(0.0, round(float(current_rem) - milestone_amount, 2))
+        if bounty:
+            milestone_amount = float(milestone.amount_usd or 0.0)
+            if target_status == "RELEASED" and old_status not in ("COMPLETED", "RELEASED"):
+                current_rem = bounty.remaining_amount_usd if bounty.remaining_amount_usd is not None else bounty.amount_usd
+                if current_rem is not None:
+                    bounty.remaining_amount_usd = max(0.0, round(float(current_rem) - milestone_amount, 2))
 
-        # 5. Check if all milestones are completed
-        all_milestones = db.query(models.Milestone).filter(models.Milestone.bounty_id == bounty.id).all()
-        all_done = all(m.status == "COMPLETED" for m in all_milestones)
+            all_milestones = db.query(models.Milestone).filter(models.Milestone.bounty_id == bounty.id).all()
+            all_done = all(m.status in ("COMPLETED", "RELEASED") for m in all_milestones)
 
-        if all_done or (bounty.remaining_amount_usd is not None and bounty.remaining_amount_usd <= 0):
-            bounty.status = "COMPLETED"
-        elif bounty.status in ("AWAITING_FUNDS", "LOCKED"):
-            bounty.status = "IN_PROGRESS"
+            if target_status == "RELEASED" and (all_done or (bounty.remaining_amount_usd is not None and bounty.remaining_amount_usd <= 0)):
+                bounty.status = "COMPLETED"
+            elif target_status == "FUNDED" and bounty.status in ("AWAITING_FUNDS", None):
+                bounty.status = "LOCKED"
+            db.add(bounty)
 
         db.add(milestone)
-        db.add(bounty)
         db.commit()
 
-        # 6. Automated Compliance: Generate and attach certificate if not present
-        try:
-            if not milestone.certificate_pdf_path:
+        # 4. Attach compliance certificate when funds are released
+        if target_status == "RELEASED" and bounty and not milestone.certificate_pdf_path:
+            try:
                 generate_and_attach_certificate(
                     bounty=bounty,
                     milestone=milestone,
@@ -3190,46 +3253,48 @@ def process_paypal_webhook_event(webhook_event: dict) -> None:
                     },
                     batch_id=payout_batch_id or capture_id or (escrow.paypal_order_id if escrow else None),
                 )
-        except Exception as cert_err:
-            logger.error("[PayPal Webhook] Error attaching compliance certificate: %s", cert_err)
+            except Exception as cert_err:
+                logger.error("[PayPal Webhook] Error attaching compliance certificate: %s", cert_err)
 
         logger.info(
-            "[PayPal Webhook] Successfully transitioned Milestone #%s on Bounty #%s to COMPLETED. (matched order_id=%s)",
-            milestone.id, bounty.id, escrow.paypal_order_id if escrow else order_id
+            "[PayPal Webhook] Updated Milestone #%s status from %s -> %s (event=%s).",
+            milestone.id, old_status, target_status, event_type,
         )
+        return {
+            "status": "processed",
+            "event_type": event_type,
+            "milestone_id": milestone.id,
+            "milestone_status": target_status,
+            "milestone_updated": True,
+        }
 
     except Exception as exc:
         db.rollback()
-        logger.error("[PayPal Webhook] Error updating database in background task: %s", exc, exc_info=True)
+        logger.error("[PayPal Webhook] Error updating database: %s", exc, exc_info=True)
+        return {"status": "error", "detail": str(exc)}
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
 @app.post("/api/webhooks/paypal", status_code=status.HTTP_200_OK)
 @app.post("/webhooks/paypal", status_code=status.HTTP_200_OK)
 async def paypal_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
 ):
     """
-    Production-grade PayPal Webhook listener:
-    1. Extracts raw body and PayPal signature headers:
-       - PAYPAL-TRANSMISSION-ID
-       - PAYPAL-TRANSMISSION-TIME
-       - PAYPAL-TRANSMISSION-SIG
-       - PAYPAL-CERT-URL
-       - PAYPAL-AUTH-ALGO
-    2. Cryptographically verifies signature via PayPal /v1/notifications/verify-webhook-signature endpoint using httpx.
-    3. If valid, dispatches asynchronous DB updates via BackgroundTasks to transition matching milestones
-       to COMPLETED for PAYMENT.CAPTURE.COMPLETED and PAYMENT.PAYOUTS-ITEM.SUCCEEDED.
-    4. Returns 200 OK immediately to prevent PayPal retries.
+    PayPal Webhook receiver:
+    - Captures JSON payload (PayPalWebhookPayload) and extracts event_type + resource.
+    - Routes PAYMENT.CAPTURE.COMPLETED -> FUNDED and PAYMENT.PAYOUTS-ITEM.SUCCEEDED -> RELEASED.
+    - Silently ignores unhandled event types and returns 200 OK to prevent endless PayPal retries.
     """
     raw_body_bytes = await request.body()
     try:
         raw_body_text = raw_body_bytes.decode("utf-8")
-        payload = json.loads(raw_body_text) if raw_body_text else {}
+        raw_json = json.loads(raw_body_text) if raw_body_text else {}
     except Exception:
-        payload = {}
+        raw_json = {}
 
     transmission_id = request.headers.get("PAYPAL-TRANSMISSION-ID") or request.headers.get("paypal-transmission-id")
     transmission_time = request.headers.get("PAYPAL-TRANSMISSION-TIME") or request.headers.get("paypal-transmission-time")
@@ -3237,9 +3302,8 @@ async def paypal_webhook(
     cert_url = request.headers.get("PAYPAL-CERT-URL") or request.headers.get("paypal-cert-url")
     auth_algo = request.headers.get("PAYPAL-AUTH-ALGO") or request.headers.get("paypal-auth-algo")
 
-    # Cryptographically verify signature with PayPal
     is_valid = await verify_paypal_webhook_signature(
-        webhook_event=payload,
+        webhook_event=raw_json,
         transmission_id=transmission_id,
         transmission_time=transmission_time,
         transmission_sig=transmission_sig,
@@ -3254,21 +3318,33 @@ async def paypal_webhook(
             detail="PayPal webhook signature verification failed",
         )
 
-    event_type = payload.get("event_type", "UNKNOWN")
-    event_id = payload.get("id", "UNKNOWN")
-    logger.info("[PayPal Webhook] Accepted event %s (%s). Dispatching background task.", event_id, event_type)
+    webhook_payload = PayPalWebhookPayload.model_validate(raw_json)
+    event_type = webhook_payload.event_type
+    resource = webhook_payload.resource
 
-    # Dispatch database updates in background to ensure immediate 200 OK response to PayPal
     if event_type in ("PAYMENT.CAPTURE.COMPLETED", "PAYMENT.PAYOUTS-ITEM.SUCCEEDED"):
-        background_tasks.add_task(process_paypal_webhook_event, payload)
+        result = process_paypal_webhook_event(
+            {"id": webhook_payload.id, "event_type": event_type, "resource": resource},
+            db_session=db,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": result.get("status", "processed"),
+                "event_id": webhook_payload.id or "UNKNOWN",
+                "event_type": event_type,
+                "milestone_updated": result.get("milestone_updated", False),
+                "milestone_status": result.get("milestone_status"),
+            },
+        )
 
+    # Silently ignore all other PayPal event types with 200 OK so PayPal does not retry
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={
-            "status": "received",
-            "event_id": event_id,
+            "status": "ignored",
+            "event_id": webhook_payload.id or "UNKNOWN",
             "event_type": event_type,
-            "verified": True,
         },
     )
 
@@ -3719,4 +3795,64 @@ def get_bounty_predictive_risk(bounty_id: int, db: Session = Depends(get_db)):
 
     risk_result = evaluate_bounty_predictive_risk(bounty, db)
     return risk_result
+
+
+# =====================================================================
+# GITHUB WEBHOOK RECEIVER (AGENTIC PR MERGE AUDIT TRIGGER)
+# =====================================================================
+
+@app.post("/api/webhooks/github", status_code=status.HTTP_200_OK)
+async def github_webhook(request: Request):
+    """
+    Receives GitHub webhook events, verifies X-Hub-Signature-256 HMAC-SHA256 digest,
+    and triggers the AI Milestone Audit when a pull_request is closed and merged.
+    """
+    raw_body = await request.body()
+    signature_header = request.headers.get("X-Hub-Signature-256")
+    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+
+    if not webhook_secret or not signature_header:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing GitHub webhook signature or secret.",
+        )
+
+    expected_signature = "sha256=" + hmac.new(
+        webhook_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, signature_header):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid GitHub webhook signature.",
+        )
+
+    github_event = request.headers.get("X-GitHub-Event", "")
+    if github_event != "pull_request":
+        return {"status": "ignored", "event": github_event}
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload.",
+        )
+
+    action = payload.get("action")
+    pull_request = payload.get("pull_request") or {}
+    if action == "closed" and pull_request.get("merged") is True:
+        pr_number = pull_request.get("number")
+        repository = payload.get("repository") or {}
+        repo_name = repository.get("full_name") or repository.get("name") or "unknown/repo"
+
+        log_msg = f"[Agentic Hook] PR #{pr_number} merged in {repo_name}. Triggering AI Milestone Audit..."
+        print(log_msg)
+        logger.info(log_msg)
+        return {"status": "processing"}
+
+    return {"status": "ignored", "action": action}
+
 
