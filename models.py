@@ -16,8 +16,9 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     wallet_address = Column(String, unique=True, index=True, nullable=False)
     wallet_private_key = Column(Text, nullable=True)  # Securely stored Ethereum private key
-    me_id = Column(String, unique=True, index=True, nullable=False)
+    me_id = Column(String, unique=True, index=True, nullable=False)  # Strictly immutable identifier
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login = Column(DateTime, default=datetime.utcnow, nullable=True)
 
     def to_dict(self):
         return {
@@ -27,6 +28,7 @@ class User(Base):
             "wallet_address": self.wallet_address,
             "me_id": self.me_id,
             "created_at": self.created_at.isoformat() if hasattr(self.created_at, "isoformat") else str(self.created_at),
+            "last_login": self.last_login.isoformat() if hasattr(self.last_login, "isoformat") else (str(self.last_login) if self.last_login else None),
         }
 
 

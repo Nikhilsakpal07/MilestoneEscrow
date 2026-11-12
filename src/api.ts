@@ -107,7 +107,9 @@ export async function createBounty(payload: any) {
   })
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}))
-    throw new Error(errData.detail || "Failed to create escrow contract")
+    const error = new Error(errData.detail || "Failed to create escrow contract")
+    ;(error as any).status = res.status
+    throw error
   }
   return res.json()
 }
@@ -276,11 +278,12 @@ export async function getAuthMe(token?: string) {
 }
 
 /**
- * Verify a Worker ME-ID against the PostgreSQL registry.
+ * Verify a Worker ME-ID (and optionally cross-validate against Worker Email) in PostgreSQL.
  */
-export async function verifyWorkerMeId(meId: string) {
+export async function verifyWorkerMeId(meId: string, email?: string) {
+  const qs = email && email.trim() ? `?email=${encodeURIComponent(email.trim())}` : ""
   const res = await fetchWithTimeout(
-    `${API_BASE}/api/users/verify-me-id/${encodeURIComponent(meId.trim())}`,
+    `${API_BASE}/api/users/verify-me-id/${encodeURIComponent(meId.trim())}${qs}`,
     {
       method: "GET",
     },
@@ -288,7 +291,9 @@ export async function verifyWorkerMeId(meId: string) {
   )
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    throw new Error(err.detail || `Worker ME-ID '${meId}' is not registered in PostgreSQL.`)
+    const error = new Error(err.detail || `Worker ME-ID '${meId}' is not registered in PostgreSQL.`)
+    ;(error as any).status = res.status
+    throw error
   }
   return res.json()
 }

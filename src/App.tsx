@@ -1741,15 +1741,16 @@ function Studio({
   const [success, setSuccess] = useState(false)
   const [activeContract, setActiveContract] = useState<BountyData | null>(null)
 
-  const handleValidateWorkerMeId = async (idToValidate: string) => {
+  const handleValidateWorkerMeId = async (idToValidate: string, emailToValidate?: string) => {
     const clean = idToValidate.trim()
     if (!clean) {
       setWorkerMeIdStatus(null)
       return
     }
+    const cleanEmail = (emailToValidate ?? workerEmail).trim()
     setValidatingMeId(true)
     try {
-      const res = await verifyWorkerMeId(clean)
+      const res = await verifyWorkerMeId(clean, cleanEmail || undefined)
       setWorkerMeIdStatus({
         valid: true,
         message: res.message || "Worker ME-ID verified in PostgreSQL registry.",
@@ -1858,15 +1859,21 @@ function Studio({
 
     let canonicalWorkerMeId = workerMeId.trim()
     try {
-      const verRes = await verifyWorkerMeId(canonicalWorkerMeId)
+      const verRes = await verifyWorkerMeId(canonicalWorkerMeId, workerEmail.trim())
       if (verRes?.me_id) {
         canonicalWorkerMeId = verRes.me_id
       }
+      setWorkerMeIdStatus({
+        valid: true,
+        message: verRes?.message || "Worker ME-ID verified and matched.",
+        wallet_address: verRes?.wallet_address,
+      })
     } catch (verErr: any) {
       if (typeof window !== "undefined" && (window as any).__E2E_MODE__) {
         // E2E testing mock verification
       } else {
         const msg = verErr.message || `Worker ME-ID '${workerMeId}' is not registered in PostgreSQL.`
+        setWorkerMeIdStatus({ valid: false, message: msg })
         setErrorMessage(msg)
         throw new Error(msg)
       }
@@ -1959,6 +1966,7 @@ function Studio({
           amount_usd: budgetNum,
           worker_me_id: canonicalWorkerMeId,
           workerMeId: canonicalWorkerMeId,
+          worker_email: workerEmail.trim(),
           sponsor_me_id: currentMeId,
           sponsor_email: currentEmail || "alex.chen@fintech-dev.io",
           created_by_user_id: authUser?.firebase_uid || authUser?.id,
@@ -1975,7 +1983,14 @@ function Studio({
             createdContractData.milestones = res.milestones
           }
         }
-      } catch (backendErr) {
+      } catch (backendErr: any) {
+        // Surface backend validation / KYC / Email-to-ME-ID mismatch errors cleanly in the UI
+        if ((backendErr as any)?.status) {
+          const msg = backendErr.message || "Contract validation failed."
+          setWorkerMeIdStatus({ valid: false, message: msg })
+          setErrorMessage(msg)
+          throw backendErr
+        }
         console.warn("[Studio] Backend createBounty fallback:", backendErr)
       }
 
@@ -2146,7 +2161,15 @@ function Studio({
                     className="minimal-input"
                     placeholder="e.g. alex.chen@fintech-dev.io"
                     value={workerEmail}
-                    onChange={(e) => setWorkerEmail(e.target.value)}
+                    onChange={(e) => {
+                      setWorkerEmail(e.target.value)
+                      if (workerMeIdStatus) setWorkerMeIdStatus(null)
+                    }}
+                    onBlur={() => {
+                      if (workerMeId.trim()) {
+                        handleValidateWorkerMeId(workerMeId, workerEmail)
+                      }
+                    }}
                     disabled={submitting || success}
                   />
                 </div>

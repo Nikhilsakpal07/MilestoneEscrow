@@ -121,8 +121,14 @@ export default function PayPalFundButton({
 
             let targetMilestoneId = activeMilestoneIdRef.current
             if (onEnsureMilestoneId) {
-              targetMilestoneId = await onEnsureMilestoneId()
-              activeMilestoneIdRef.current = targetMilestoneId
+              try {
+                targetMilestoneId = await onEnsureMilestoneId()
+                activeMilestoneIdRef.current = targetMilestoneId
+              } catch (err: any) {
+                const msg = err?.message || "Contract validation failed."
+                setErrorMsg(msg)
+                throw err
+              }
             }
 
             const res = await createMilestonePayPalOrder(targetMilestoneId, numericAmount)
