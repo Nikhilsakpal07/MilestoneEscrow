@@ -330,5 +330,63 @@ export async function captureMilestonePayPalOrder(milestoneId: number | string, 
   return res.json()
 }
 
+/**
+ * Fetch current user profile (including dedicated paypal_email) from GET /api/users/me.
+ */
+export async function getUserProfile(params: {
+  token?: string
+  firebaseUid?: string
+  email?: string
+}) {
+  const headers: Record<string, string> = {}
+  if (params.token) {
+    headers["Authorization"] = `Bearer ${params.token}`
+  }
+  const query = new URLSearchParams()
+  if (params.firebaseUid) query.append("firebase_uid", params.firebaseUid)
+  if (params.email) query.append("email", params.email)
+  const qs = query.toString() ? `?${query.toString()}` : ""
+
+  const res = await fetchWithTimeout(`${API_BASE}/api/users/me${qs}`, {
+    method: "GET",
+    headers,
+  }, 3000)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "Failed to load user profile.")
+  }
+  return res.json()
+}
+
+/**
+ * Update mutable profile fields (e.g. paypal_email) via PATCH /api/users/profile.
+ */
+export async function updateUserProfile(
+  payload: {
+    firebase_uid?: string
+    email?: string
+    paypal_email: string
+    name?: string
+  },
+  token?: string
+) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  }
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const res = await fetchWithTimeout(`${API_BASE}/api/users/profile`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(payload),
+  }, 4000)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "Failed to update account settings.")
+  }
+  return res.json()
+}
+
 
 

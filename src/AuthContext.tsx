@@ -16,9 +16,11 @@ export interface UserAccount {
   id?: string
   firebase_uid: string
   email: string
+  paypal_email?: string
   me_id: string
   wallet_address?: string
   created_at?: string
+  last_login?: string
   name?: string
   idToken?: string
 }
@@ -58,6 +60,7 @@ export function deriveClientIdentity(uid: string, email: string, name?: string):
   return {
     firebase_uid: cleanUid,
     email: cleanEmail,
+    paypal_email: cleanEmail,
     name: name || cleanEmail.split("@")[0],
     me_id,
     wallet_address,

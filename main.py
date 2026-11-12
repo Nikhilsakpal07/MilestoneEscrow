@@ -1,4 +1,5 @@
 import os
+import re
 import hmac
 import hashlib
 import random
@@ -75,6 +76,8 @@ try:
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_wallet_address ON users (wallet_address);"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_me_id ON users (me_id);"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP WITHOUT TIME ZONE;"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS paypal_email VARCHAR;"))
+        conn.execute(text("UPDATE users SET paypal_email = email WHERE paypal_email IS NULL;"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS workers (
                 id SERIAL PRIMARY KEY,
@@ -272,6 +275,30 @@ def generate_and_attach_certificate(
         return None
 
 
+def resolve_worker_payout_email(bounty: models.Bounty, db: Session) -> str:
+    """
+    Resolves the dedicated PayPal payout destination for a bounty's worker.
+    Queries the User table by worker_me_id or freelancer_email and routes payouts
+    to worker.paypal_email (defaulting to worker.email / bounty.freelancer_email).
+    """
+    worker_user = None
+    if bounty.worker_me_id:
+        worker_user = (
+            db.query(models.User)
+            .filter(func.lower(models.User.me_id) == str(bounty.worker_me_id).strip().lower())
+            .first()
+        )
+    if not worker_user and bounty.freelancer_email:
+        worker_user = (
+            db.query(models.User)
+            .filter(func.lower(models.User.email) == str(bounty.freelancer_email).strip().lower())
+            .first()
+        )
+    if worker_user:
+        return (worker_user.paypal_email or worker_user.email or bounty.freelancer_email or "").strip()
+    return (bounty.freelancer_email or "").strip()
+
+
 def process_oracle_deliveries(db: Session) -> list[dict]:
     """
     Oracle background task / sync processor:
@@ -354,7 +381,7 @@ def process_oracle_deliveries(db: Session) -> list[dict]:
 
                 pooled_res = pool_and_payout_milestone(
                     authorization_ids=m_auth_ids,
-                    freelancer_email=bounty.freelancer_email,
+                    freelancer_email=resolve_worker_payout_email(bounty, db),
                     amount=payout_amount,
                     bounty_id=bounty.id,
                     milestone_id=m.id,
@@ -971,6 +998,8 @@ def sync_or_register_user_record(
         # Strictly preserve existing_user.me_id and wallet; only update last_login
         if not existing_user.firebase_uid:
             existing_user.firebase_uid = clean_uid
+        if not existing_user.paypal_email:
+            existing_user.paypal_email = existing_user.email
         existing_user.last_login = now_dt
         display_name = name or clean_email.split("@")[0]
         _ensure_worker_and_sponsor_records(
@@ -984,7 +1013,7 @@ def sync_or_register_user_record(
         db.refresh(existing_user)
         return existing_user, False
 
-    # First-time registration: generate wallet and immutable ME-ID once
+    # First-time registration: generate wallet and immutable ME-ID once; default paypal_email to login email
     wallet_address, wallet_private_key = generate_ethereum_wallet()
     new_me_id = derive_blockchain_me_id(wallet_address, db)
 
@@ -992,6 +1021,7 @@ def sync_or_register_user_record(
         id=uuid.uuid4(),
         firebase_uid=clean_uid,
         email=clean_email,
+        paypal_email=clean_email,
         wallet_address=wallet_address,
         wallet_private_key=wallet_private_key,
         me_id=new_me_id,
@@ -1060,15 +1090,18 @@ def register_or_sync_user(
 
 
 @app.get("/api/auth/me", status_code=status.HTTP_200_OK)
+@app.get("/api/users/me", status_code=status.HTTP_200_OK)
 async def get_current_user_profile(
     request: Request,
     token: str | None = None,
+    firebase_uid: str | None = None,
+    email: str | None = None,
     db: Session = Depends(get_db),
 ):
     """
-    GET /api/auth/me:
-    Verifies Firebase JWT and returns the user's PostgreSQL record.
-    Never overwrites an existing me_id; updates last_login.
+    GET /api/auth/me & GET /api/users/me:
+    Verifies Firebase JWT (or looks up via firebase_uid/email when called from Account Settings)
+    and returns the user's PostgreSQL record including paypal_email and immutable me_id.
     """
     auth_header = request.headers.get("Authorization")
     jwt_token = None
@@ -1079,29 +1112,34 @@ async def get_current_user_profile(
     elif token:
         jwt_token = token.strip()
 
-    if not jwt_token:
+    uid = (firebase_uid or "").strip() or None
+    resolved_email = (email or "").strip().lower() or None
+    display_name = None
+
+    if jwt_token:
+        claims = await verify_firebase_jwt(jwt_token)
+        uid = claims.get("uid") or uid
+        resolved_email = (claims.get("email") or resolved_email or "").strip().lower() or None
+        display_name = claims.get("display_name")
+    elif not uid and not resolved_email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header with Firebase Bearer token.",
         )
 
-    claims = await verify_firebase_jwt(jwt_token)
-    uid = claims.get("uid")
-    email = claims.get("email")
-
     user = None
     if uid:
         user = db.query(models.User).filter(models.User.firebase_uid == uid).first()
-    if not user and email:
-        user = db.query(models.User).filter(func.lower(models.User.email) == email.strip().lower()).first()
+    if not user and resolved_email:
+        user = db.query(models.User).filter(func.lower(models.User.email) == resolved_email).first()
 
     if not user:
-        if uid and email:
+        if uid and resolved_email:
             user, _ = sync_or_register_user_record(
                 db,
                 firebase_uid=uid,
-                email=email,
-                name=claims.get("display_name"),
+                email=resolved_email,
+                name=display_name,
             )
         else:
             raise HTTPException(
@@ -1109,13 +1147,15 @@ async def get_current_user_profile(
                 detail="User not found in PostgreSQL. Please register via POST /api/auth/register.",
             )
     else:
+        if not user.paypal_email:
+            user.paypal_email = user.email
         user.last_login = datetime.utcnow()
         _ensure_worker_and_sponsor_records(
             db,
             me_id=user.me_id,
             firebase_uid=user.firebase_uid,
             email=user.email,
-            display_name=claims.get("display_name") or user.email.split("@")[0],
+            display_name=display_name or user.email.split("@")[0],
         )
         db.commit()
         db.refresh(user)
@@ -1126,6 +1166,9 @@ async def get_current_user_profile(
     }
 
 
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 @app.patch("/api/users/me", status_code=status.HTTP_200_OK)
 @app.put("/api/users/profile", status_code=status.HTTP_200_OK)
 @app.patch("/api/users/profile", status_code=status.HTTP_200_OK)
@@ -1134,9 +1177,9 @@ async def update_user_profile(
     db: Session = Depends(get_db),
 ):
     """
-    Profile update lockdown endpoint:
-    Explicitly drops/ignores immutable identity fields (me_id, wallet_address,
-    wallet_private_key, id) from incoming payloads so ME-ID can never be altered.
+    Profile update endpoint:
+    - Explicitly drops/ignores immutable identity fields (me_id, wallet_address, etc.).
+    - Allows updating `paypal_email` with strict email format validation.
     """
     try:
         raw_payload = await request.json()
@@ -1162,6 +1205,15 @@ async def update_user_profile(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found.")
 
+    if "paypal_email" in raw_payload:
+        raw_paypal_email = (raw_payload.get("paypal_email") or "").strip().lower()
+        if not raw_paypal_email or not EMAIL_REGEX.match(raw_paypal_email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid PayPal payout email format. Please enter a valid email address.",
+            )
+        user.paypal_email = raw_paypal_email
+
     worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == user.me_id.lower()).first()
     if worker:
         if "name" in raw_payload and raw_payload["name"]:
@@ -1173,7 +1225,7 @@ async def update_user_profile(
     db.refresh(user)
     return {
         "status": "success",
-        "message": "Profile updated. Immutable ME-ID preserved.",
+        "message": "Profile updated. PayPal payout routing saved and immutable ME-ID preserved.",
         "user": user.to_dict(),
     }
 
@@ -2437,10 +2489,10 @@ async def submit_work(
                 elif escrow.paypal_authorization_id:
                     m_auth_ids = [escrow.paypal_authorization_id]
 
-            # 2. Loops through all authorized IDs, captures them simultaneously, and pools funds to the payee
+            # 2. Loops through all authorized IDs, captures them simultaneously, and pools funds to the payee's paypal_email
             pooled_result = pool_and_payout_milestone(
                 authorization_ids=m_auth_ids,
-                freelancer_email=bounty.freelancer_email,
+                freelancer_email=resolve_worker_payout_email(bounty, db),
                 amount=payout_amount,
                 bounty_id=bounty_id,
                 milestone_id=milestone.id,
@@ -2631,7 +2683,7 @@ async def appeal_rejection(
             payout_amount = float(milestone.amount_usd)
             pooled_res = pool_and_payout_milestone(
                 authorization_ids=auth_ids,
-                freelancer_email=bounty.freelancer_email,
+                freelancer_email=resolve_worker_payout_email(bounty, db),
                 amount=payout_amount,
                 bounty_id=bounty_id,
                 milestone_id=milestone.id,
@@ -2837,10 +2889,10 @@ async def admin_final_approve(
                 detail="No valid PayPal authorization IDs found for this milestone to capture.",
             )
 
-        # Simultaneously capture all authorized sponsor IDs and execute PayPal Payout
+        # Simultaneously capture all authorized sponsor IDs and execute PayPal Payout to worker's paypal_email
         pooled_res = pool_and_payout_milestone(
             authorization_ids=auth_ids,
-            freelancer_email=bounty.freelancer_email,
+            freelancer_email=resolve_worker_payout_email(bounty, db),
             amount=payout_amount,
             bounty_id=bounty.id,
             milestone_id=milestone.id,
@@ -3743,7 +3795,7 @@ async def twilio_whatsapp_webhook(
 
             pooled_res = pool_and_payout_milestone(
                 authorization_ids=m_auth_ids,
-                freelancer_email=matched_bounty.freelancer_email,
+                freelancer_email=resolve_worker_payout_email(matched_bounty, db),
                 amount=payout_amount,
                 bounty_id=matched_bounty.id,
                 milestone_id=milestone.id,
@@ -4233,6 +4285,107 @@ async def capture_milestone_paypal_order(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to capture PayPal order: {str(exc)}",
+        )
+
+
+@app.post("/api/milestones/{milestone_id}/release", status_code=status.HTTP_200_OK)
+async def release_milestone_funds(
+    milestone_id: int,
+    db: Session = Depends(get_db),
+):
+    """
+    Releases escrow funds for a completed milestone directly to the assigned worker's
+    dedicated `paypal_email` (fetched from the User record, falling back to login email).
+    """
+    milestone = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    if not milestone:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Milestone #{milestone_id} not found.",
+        )
+
+    bounty = milestone.bounty
+    if not bounty:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Parent contract for Milestone #{milestone_id} not found.",
+        )
+
+    payout_email = resolve_worker_payout_email(bounty, db)
+    if not payout_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assigned worker has no PayPal payout email or account email configured.",
+        )
+
+    payout_amount = float(milestone.amount_usd or 0.0)
+    if payout_amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Milestone payout amount must be greater than 0.",
+        )
+
+    escrow = bounty.escrow or db.query(models.Escrow).filter(models.Escrow.bounty_id == bounty.id).first()
+    auth_ids = list(milestone.authorization_ids or [])
+    if not auth_ids and escrow:
+        if escrow.paypal_authorization_ids:
+            auth_ids = list(escrow.paypal_authorization_ids)
+        elif escrow.paypal_authorization_id:
+            auth_ids = [escrow.paypal_authorization_id]
+
+    try:
+        if auth_ids:
+            pooled_res = pool_and_payout_milestone(
+                authorization_ids=auth_ids,
+                freelancer_email=payout_email,
+                amount=payout_amount,
+                bounty_id=bounty.id,
+                milestone_id=milestone.id,
+            )
+            payout_res = pooled_res.get("payout", {})
+        else:
+            payout_res = execute_payout(
+                freelancer_email=payout_email,
+                amount=payout_amount,
+                bounty_id=bounty.id,
+                milestone_id=milestone.id,
+            )
+
+        batch_id = payout_res.get("batch_header", {}).get("payout_batch_id") or f"REL-{milestone.id}"
+        milestone.paypal_payout_batch_id = batch_id
+        milestone.status = "RELEASED"
+
+        current_rem = bounty.remaining_amount_usd if bounty.remaining_amount_usd is not None else bounty.amount_usd
+        if current_rem is not None:
+            bounty.remaining_amount_usd = max(0.0, round(float(current_rem) - payout_amount, 2))
+
+        all_milestones = db.query(models.Milestone).filter(models.Milestone.bounty_id == bounty.id).all()
+        if all(m.status in ("COMPLETED", "RELEASED") for m in all_milestones) or (
+            bounty.remaining_amount_usd is not None and bounty.remaining_amount_usd <= 0
+        ):
+            bounty.status = "COMPLETED"
+
+        db.add(milestone)
+        db.add(bounty)
+        db.commit()
+
+        logger.info(
+            "[Financial Engine] Released $%.2f USD for Milestone #%d directly to PayPal %s (Batch: %s)",
+            payout_amount, milestone.id, payout_email, batch_id,
+        )
+        return {
+            "status": "RELEASED",
+            "milestone_id": milestone.id,
+            "payout_email": payout_email,
+            "amount_usd": payout_amount,
+            "paypal_payout_batch_id": batch_id,
+        }
+    except Exception as exc:
+        db.rollback()
+        logger.error("[Milestone Release] PayPal payout failed for Milestone #%d: %s", milestone.id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to execute PayPal Payout: {str(exc)}",
         )
 
 

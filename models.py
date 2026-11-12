@@ -14,6 +14,7 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     firebase_uid = Column(String, unique=True, index=True, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
+    paypal_email = Column(String, nullable=True)  # Dedicated PayPal payout routing address
     wallet_address = Column(String, unique=True, index=True, nullable=False)
     wallet_private_key = Column(Text, nullable=True)  # Securely stored Ethereum private key
     me_id = Column(String, unique=True, index=True, nullable=False)  # Strictly immutable identifier
@@ -25,6 +26,7 @@ class User(Base):
             "id": str(self.id),
             "firebase_uid": self.firebase_uid,
             "email": self.email,
+            "paypal_email": self.paypal_email or self.email,
             "wallet_address": self.wallet_address,
             "me_id": self.me_id,
             "created_at": self.created_at.isoformat() if hasattr(self.created_at, "isoformat") else str(self.created_at),

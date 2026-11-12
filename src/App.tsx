@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import Auth from "./Auth"
 import PayPalFundButton from "./components/PayPalFundButton"
+import AccountSettingsModal from "./components/AccountSettingsModal"
 import { AuthProvider, useAuth, deriveClientIdentity, type UserAccount } from "./AuthContext"
 import {
   type User,
@@ -203,6 +204,7 @@ function Header({
   }
 
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [copiedId, setCopiedId] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -253,6 +255,7 @@ function Header({
   }
 
   return (
+    <>
     <header className="topbar">
       <button
         className="brand"
@@ -345,7 +348,10 @@ function Header({
                   type="button"
                   className="dropdown-item"
                   role="menuitem"
-                  onClick={() => setDropdownOpen(false)}
+                  onClick={() => {
+                    setDropdownOpen(false)
+                    setSettingsOpen(true)
+                  }}
                 >
                   <Icon name="settings" size={14} />
                   <span>Account Settings</span>
@@ -355,7 +361,10 @@ function Header({
                   type="button"
                   className="dropdown-item"
                   role="menuitem"
-                  onClick={() => setDropdownOpen(false)}
+                  onClick={() => {
+                    setDropdownOpen(false)
+                    setSettingsOpen(true)
+                  }}
                 >
                   <Icon name="creditCard" size={14} />
                   <span>Payout Methods</span>
@@ -397,6 +406,13 @@ function Header({
         </div>
       </div>
     </header>
+    <AccountSettingsModal
+      isOpen={settingsOpen}
+      onClose={() => setSettingsOpen(false)}
+      fallbackEmail={userEmail}
+      fallbackMeId={currentMeId}
+    />
+    </>
   )
 }
 
