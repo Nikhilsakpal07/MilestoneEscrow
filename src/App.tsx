@@ -1158,8 +1158,10 @@ export function isDemoOrE2E(email?: string, meId?: string): boolean {
     cleanEmail.includes("alex.chen") ||
     cleanEmail.includes("fintech-dev.io") ||
     cleanEmail.includes("admin@compliance") ||
+    cleanEmail === "milestone.demo.admin@gmail.com" ||
     cleanMeId === "ME-8492-X" ||
-    cleanMeId === "ME-SPON-8492"
+    cleanMeId === "ME-SPON-8492" ||
+    cleanMeId === "ME-0XADMN-9001"
   )
 }
 
@@ -3643,7 +3645,7 @@ function InnerApp({ initialScreen = "landing" }: { initialScreen?: Screen }) {
     const activeEmail = (authUser?.email || (user as any)?.email || "").trim().toLowerCase()
     const isDemo = isDemoOrE2E(activeEmail, activeMeId)
 
-    if (isDemo) {
+    if (isDemo || adminAuthenticated) {
       try {
         const data = await getBounties()
         if (Array.isArray(data) && data.length > 0) {
@@ -3698,7 +3700,7 @@ function InnerApp({ initialScreen = "landing" }: { initialScreen?: Screen }) {
 
   useEffect(() => {
     loadBounties()
-  }, [authUser?.email, authUser?.me_id, (user as any)?.email, (user as any)?.me_id])
+  }, [authUser?.email, authUser?.me_id, (user as any)?.email, (user as any)?.me_id, adminAuthenticated])
 
   // Trigger screen transition animation on route change
   useEffect(() => {
@@ -3780,6 +3782,9 @@ function InnerApp({ initialScreen = "landing" }: { initialScreen?: Screen }) {
               setUser(userAccount as any)
             } else {
               setUser({ email: "alex.chen@fintech-dev.io" } as any)
+            }
+            if (isAdmin) {
+              setAdminAuthenticated(true)
             }
             setScreen(isAdmin ? "admin" : "dashboard")
           }}

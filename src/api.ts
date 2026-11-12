@@ -102,7 +102,7 @@ export async function getBounties(meId?: string, email?: string, role?: string):
     if (email) params.append("email", email)
     if (role) params.append("role", role)
     const qs = params.toString() ? `?${params.toString()}` : ""
-    const res = await fetchWithTimeout(`${API_BASE}/api/bounties${qs}`, { method: "GET" }, 2500)
+    const res = await fetchWithTimeout(`${API_BASE}/api/bounties${qs}`, { method: "GET" }, 10000)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     if (Array.isArray(data)) {
@@ -307,7 +307,7 @@ export async function registerAuthUser(firebaseUid: string, email: string, name?
       email,
       name,
     }),
-  }, 2500)
+  }, 10000)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || "User registration failed.")
@@ -326,7 +326,7 @@ export async function getAuthMe(token?: string) {
   const res = await fetchWithTimeout(`${API_BASE}/api/auth/me`, {
     method: "GET",
     headers,
-  }, 2500)
+  }, 10000)
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     throw new Error(err.detail || "Failed to fetch user profile from PostgreSQL.")
@@ -344,7 +344,7 @@ export async function verifyWorkerMeId(meId: string, email?: string) {
     {
       method: "GET",
     },
-    2500
+    10000
   )
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))

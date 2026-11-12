@@ -488,7 +488,17 @@ async def predictive_risk_background_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: spawn background oracle polling task and predictive risk scorer
+    # Startup: ensure demo user/admin & showcase contracts exist in PostgreSQL
+    try:
+        seed_db = SessionLocal()
+        try:
+            seed_demo_showcase_data(seed_db)
+        finally:
+            seed_db.close()
+    except Exception as seed_err:
+        logger.warning("[Demo Seed Startup Notice]: %s", seed_err)
+
+    # Spawn background oracle polling task and predictive risk scorer
     oracle_task = asyncio.create_task(oracle_background_poll_worker())
     risk_task = asyncio.create_task(predictive_risk_background_worker())
     logger.info("[MilestoneEscrow] Background Logistics Oracle Poller & Predictive Risk Scorer started.")
@@ -679,10 +689,11 @@ def list_bounties(
 
     clean_me_id_lower = clean_me_id.lower()
     is_demo = (
-        clean_me_id.upper() in ["ME-8492-X", "ME-SPON-8492"]
+        clean_me_id.upper() in ["ME-8492-X", "ME-SPON-8492", "ME-0xADMN-9001".upper()]
         or "alex.chen" in clean_email
         or "fintech-dev.io" in clean_email
         or "admin@compliance" in clean_email
+        or clean_email == "milestone.demo.admin@gmail.com"
     )
 
     if (clean_me_id or clean_email) and not is_demo:
@@ -4605,6 +4616,436 @@ async def audit_or_submit_milestone(
         "audit_result": persisted_result,
         "audited_at": now_ts.isoformat(),
     }
+
+
+def _upsert_demo_user(
+    db: Session,
+    *,
+    firebase_uid: str,
+    email: str,
+    preferred_me_id: str,
+    display_name: str,
+) -> models.User:
+    """Idempotently creates or syncs a demo user, preserving existing me_id if already created."""
+    clean_email = email.strip().lower()
+    existing = (
+        db.query(models.User)
+        .filter(
+            (models.User.firebase_uid == firebase_uid)
+            | (func.lower(models.User.email) == clean_email)
+        )
+        .first()
+    )
+    if existing:
+        if not existing.firebase_uid:
+            existing.firebase_uid = firebase_uid
+        if not existing.paypal_email:
+            existing.paypal_email = clean_email
+        _ensure_worker_and_sponsor_records(
+            db,
+            me_id=existing.me_id,
+            firebase_uid=existing.firebase_uid,
+            email=existing.email,
+            display_name=display_name,
+        )
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    wallet_address, wallet_private_key = generate_ethereum_wallet()
+    me_id_conflict = (
+        db.query(models.User).filter(func.lower(models.User.me_id) == preferred_me_id.lower()).first()
+        or db.query(models.Worker).filter(func.lower(models.Worker.me_id) == preferred_me_id.lower()).first()
+    )
+    assigned_me_id = (
+        derive_blockchain_me_id(wallet_address, db) if me_id_conflict else preferred_me_id
+    )
+    now_dt = datetime.utcnow()
+    new_user = models.User(
+        id=uuid.uuid4(),
+        firebase_uid=firebase_uid,
+        email=clean_email,
+        paypal_email=clean_email,
+        wallet_address=wallet_address,
+        wallet_private_key=wallet_private_key,
+        me_id=assigned_me_id,
+        created_at=now_dt,
+        last_login=now_dt,
+    )
+    db.add(new_user)
+    _ensure_worker_and_sponsor_records(
+        db,
+        me_id=assigned_me_id,
+        firebase_uid=firebase_uid,
+        email=clean_email,
+        display_name=display_name,
+    )
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+def seed_demo_showcase_data(db: Session) -> dict:
+    """
+    Idempotently seeds the Demo User, Demo Counterparty Worker, Demo Compliance Admin,
+    and 6 showcase contracts spanning Sponsor View, Worker View, Pending Deliverable guard,
+    Gemini AI Audits (Passed & Rejected), High-Value Admin Multi-Sig (> $5,000), and Logistics Oracle.
+    """
+    demo_user = _upsert_demo_user(
+        db,
+        firebase_uid="Cb6OpHTMqea34T9HT52g2Dpeuzh1",
+        email="milestone.demo.user@gmail.com",
+        preferred_me_id="ME-0xDEMO-1001",
+        display_name="Demo Escrow Evaluator",
+    )
+    demo_worker = _upsert_demo_user(
+        db,
+        firebase_uid="ksLGSfsVC1antrPmENEEsCUIXTP2",
+        email="milestone.demo.worker@gmail.com",
+        preferred_me_id="ME-0xWORK-2002",
+        display_name="Demo Verified Contractor",
+    )
+    demo_admin = _upsert_demo_user(
+        db,
+        firebase_uid="BBVrpnCkbtTqHVes5lbqyRKyL3X2",
+        email="milestone.demo.admin@gmail.com",
+        preferred_me_id="ME-0xADMN-9001",
+        display_name="Demo Compliance Officer",
+    )
+
+    now_iso = datetime.utcnow().isoformat()
+    created_titles = []
+
+    showcase_specs = [
+        {
+            "title": "[DEMO] Public Webhook Relay & HMAC Signature Verifier",
+            "acceptance_criteria": (
+                "Implement HMAC-SHA256 webhook verification middleware, idempotent event replay protection, "
+                "README setup instructions, and passing unit tests."
+            ),
+            "amount_usd": 1800.0,
+            "remaining_amount_usd": 1800.0,
+            "freelancer_email": demo_user.email,
+            "worker_me_id": demo_user.me_id,
+            "sponsor_me_id": demo_worker.me_id,
+            "status": "LOCKED",
+            "risk_score": "LOW",
+            "risk_percentage": 12,
+            "risk_factors": ["Escrow funded and locked", "Awaiting initial repository submission"],
+            "milestones": [
+                {
+                    "description": "HMAC Verification Middleware & Test Suite (Submit GitHub URL to test Gemini Audit)",
+                    "deadline": "2026-12-10",
+                    "percentage": 100.0,
+                    "amount_usd": 1800.0,
+                    "status": "LOCKED",
+                    "criteria_strings": [
+                        "HMAC-SHA256 signature verification middleware",
+                        "Documented README and reproducible test suite",
+                    ],
+                }
+            ],
+        },
+        {
+            "title": "[DEMO] OAuth2 Token Rotation & Session Security Audit",
+            "acceptance_criteria": (
+                "Deliver OAuth2 token rotation endpoints, documented README, and clean repository commit history."
+            ),
+            "amount_usd": 2400.0,
+            "remaining_amount_usd": 0.0,
+            "freelancer_email": demo_user.email,
+            "worker_me_id": demo_user.me_id,
+            "sponsor_me_id": demo_worker.me_id,
+            "status": "COMPLETED",
+            "risk_score": "LOW",
+            "risk_percentage": 8,
+            "risk_factors": ["AI Audit verified (94/100)", "PayPal Payout settled cleanly"],
+            "milestones": [
+                {
+                    "description": "OAuth2 Rotation Service & Verification Dossier",
+                    "deadline": "2026-11-15",
+                    "percentage": 100.0,
+                    "amount_usd": 2400.0,
+                    "status": "COMPLETED",
+                    "paypal_payout_batch_id": "DEMO-PAYOUT-9041",
+                    "submitted_github_url": "https://github.com/octocat/Hello-World",
+                    "submission_notes": "Completed OAuth2 token rotation handlers and documented setup in README.",
+                    "audit_result": {
+                        "passed": True,
+                        "score": 94,
+                        "summary": "Verified public repository structure, README documentation, and commit history against milestone criteria.",
+                        "criteria_results": [
+                            {
+                                "criterion": "Public Repository Accessibility & Commit Integrity",
+                                "passed": True,
+                                "metric": "VERIFIED",
+                                "evidence": "Fetched commit 7fd1a60b01f9 via GitHub REST API.",
+                            },
+                            {
+                                "criterion": "Documentation & Setup Instructions (README)",
+                                "passed": True,
+                                "metric": "VERIFIED",
+                                "evidence": "README present and describes repository deliverable clearly.",
+                            },
+                        ],
+                        "telemetry": {
+                            "github_url": "https://github.com/octocat/Hello-World",
+                            "commit_sha": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+                            "files_inspected": 1,
+                            "file_names": ["README"],
+                            "fetch_status": "ok",
+                            "submission_notes": "Completed OAuth2 token rotation handlers and documented setup in README.",
+                            "model": "gemini-3-flash-preview",
+                        },
+                        "audited_at": now_iso,
+                    },
+                    "audited_at": datetime.utcnow(),
+                }
+            ],
+        },
+        {
+            "title": "[DEMO] Zero-Downtime Rate Limiter Middleware (Appeal Test)",
+            "acceptance_criteria": (
+                "Implement Redis-backed sliding-window rate limiter with automated burst load tests and 429 Retry-After headers."
+            ),
+            "amount_usd": 1500.0,
+            "remaining_amount_usd": 1500.0,
+            "freelancer_email": demo_user.email,
+            "worker_me_id": demo_user.me_id,
+            "sponsor_me_id": demo_worker.me_id,
+            "status": "IN_PROGRESS",
+            "risk_score": "MEDIUM",
+            "risk_percentage": 46,
+            "risk_factors": ["Initial AI audit flagged missing Redis burst tests", "Eligible for Mediator AI appeal"],
+            "milestones": [
+                {
+                    "description": "Sliding-Window Limiter & Load Assertions",
+                    "deadline": "2026-11-28",
+                    "percentage": 100.0,
+                    "amount_usd": 1500.0,
+                    "status": "REJECTED",
+                    "submitted_github_url": "https://github.com/octocat/Hello-World",
+                    "submission_notes": "Core middleware pushed; load test suite still pending.",
+                    "audit_result": {
+                        "passed": False,
+                        "score": 46,
+                        "summary": "Core repository exists, but Redis sliding-window implementation and automated 429 burst tests were not found in inspected files.",
+                        "criteria_results": [
+                            {
+                                "criterion": "Repository & Commit Telemetry",
+                                "passed": True,
+                                "metric": "VERIFIED",
+                                "evidence": "Repository reachable with verified commit history.",
+                            },
+                            {
+                                "criterion": "Redis Sliding-Window & 429 Load Test Assertions",
+                                "passed": False,
+                                "metric": "MISSING",
+                                "evidence": "No Redis limiter code or 429 assertion suite present in fetched files.",
+                            },
+                        ],
+                        "telemetry": {
+                            "github_url": "https://github.com/octocat/Hello-World",
+                            "commit_sha": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+                            "files_inspected": 1,
+                            "file_names": ["README"],
+                            "fetch_status": "ok",
+                            "submission_notes": "Core middleware pushed; load test suite still pending.",
+                            "model": "gemini-3-flash-preview",
+                        },
+                        "audited_at": now_iso,
+                    },
+                    "audited_at": datetime.utcnow(),
+                }
+            ],
+        },
+        {
+            "title": "[DEMO] High-Value Multi-Sig Payment Gateway Settlement (> $5k Admin Queue)",
+            "acceptance_criteria": (
+                "Deliver PCI-compliant tokenization bridge, dual-signature settlement guard, and verified integration tests."
+            ),
+            "amount_usd": 8500.0,
+            "remaining_amount_usd": 8500.0,
+            "freelancer_email": demo_worker.email,
+            "worker_me_id": demo_worker.me_id,
+            "sponsor_me_id": demo_user.me_id,
+            "status": "PENDING_ADMIN",
+            "requires_human_approval": True,
+            "risk_score": "MEDIUM",
+            "risk_percentage": 38,
+            "risk_factors": ["High-value multi-sig threshold (> $5,000 USD) triggered", "Awaiting Compliance Admin final sign-off"],
+            "milestones": [
+                {
+                    "description": "Tokenization Bridge & Multi-Sig Release Package",
+                    "deadline": "2026-12-01",
+                    "percentage": 100.0,
+                    "amount_usd": 8500.0,
+                    "status": "PENDING_ADMIN",
+                    "requires_human_approval": True,
+                    "submitted_github_url": "https://github.com/octocat/Hello-World",
+                    "submission_notes": "All multi-sig settlement endpoints implemented and AI-verified; ready for Admin approval.",
+                    "audit_result": {
+                        "passed": True,
+                        "score": 95,
+                        "summary": "AI audit passed all functional requirements. Held in PENDING_ADMIN due to > $5,000 Multi-Sig compliance gate.",
+                        "criteria_results": [
+                            {
+                                "criterion": "Settlement Endpoint & Schema Verification",
+                                "passed": True,
+                                "metric": "VERIFIED",
+                                "evidence": "All specified endpoints and schema contracts verified.",
+                            },
+                            {
+                                "criterion": "Human Multi-Sig Compliance Gate (> $5,000 USD)",
+                                "passed": True,
+                                "metric": "PENDING_COSIGN",
+                                "evidence": "Queued in Compliance Admin Dashboard for co-signer approval.",
+                            },
+                        ],
+                        "telemetry": {
+                            "github_url": "https://github.com/octocat/Hello-World",
+                            "commit_sha": "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+                            "files_inspected": 1,
+                            "file_names": ["README"],
+                            "fetch_status": "ok",
+                            "model": "gemini-3-flash-preview",
+                        },
+                        "audited_at": now_iso,
+                    },
+                    "audited_at": datetime.utcnow(),
+                }
+            ],
+        },
+        {
+            "title": "[DEMO] Hardware Security Key Logistics & Firmware Delivery",
+            "acceptance_criteria": (
+                "Ship provisioned hardware security modules with signed manifest and verifiable carrier tracking oracle status."
+            ),
+            "amount_usd": 3200.0,
+            "remaining_amount_usd": 1600.0,
+            "freelancer_email": demo_worker.email,
+            "worker_me_id": demo_worker.me_id,
+            "sponsor_me_id": demo_user.me_id,
+            "tracking_number": "TRK-994821-DEL",
+            "shipping_status": "IN_TRANSIT",
+            "status": "IN_PROGRESS",
+            "risk_score": "LOW",
+            "risk_percentage": 14,
+            "risk_factors": ["Phase 1 firmware released", "Logistics Oracle polling active for TRK-994821-DEL"],
+            "milestones": [
+                {
+                    "description": "Phase 1: Signed Bootloader Firmware",
+                    "deadline": "2026-11-10",
+                    "percentage": 50.0,
+                    "amount_usd": 1600.0,
+                    "status": "COMPLETED",
+                    "paypal_payout_batch_id": "DEMO-PAYOUT-9012",
+                },
+                {
+                    "description": "Phase 2: Physical HSM Consignment Delivery (Logistics Oracle)",
+                    "deadline": "2026-12-08",
+                    "percentage": 50.0,
+                    "amount_usd": 1600.0,
+                    "status": "LOCKED",
+                    "tracking_number": "TRK-994821-DEL",
+                    "shipping_status": "IN_TRANSIT",
+                },
+            ],
+        },
+        {
+            "title": "[DEMO] GraphQL Telemetry Subscriptions & Schema Docs",
+            "acceptance_criteria": (
+                "Implement authenticated GraphQL WebSocket subscriptions with schema introspection tests."
+            ),
+            "amount_usd": 950.0,
+            "remaining_amount_usd": 950.0,
+            "freelancer_email": demo_worker.email,
+            "worker_me_id": demo_worker.me_id,
+            "sponsor_me_id": demo_user.me_id,
+            "status": "AWAITING_FUNDS",
+            "risk_score": "LOW",
+            "risk_percentage": 10,
+            "risk_factors": ["Ready for PayPal Checkout escrow deposit"],
+            "milestones": [
+                {
+                    "description": "GraphQL Subscription Resolver & Schema Tests",
+                    "deadline": "2026-12-20",
+                    "percentage": 100.0,
+                    "amount_usd": 950.0,
+                    "status": "AWAITING_FUNDS",
+                }
+            ],
+        },
+    ]
+
+    for spec in showcase_specs:
+        existing_b = (
+            db.query(models.Bounty)
+            .filter(models.Bounty.title == spec["title"])
+            .first()
+        )
+        if existing_b:
+            continue
+
+        bounty = models.Bounty(
+            title=spec["title"],
+            acceptance_criteria=spec["acceptance_criteria"],
+            amount_usd=spec["amount_usd"],
+            remaining_amount_usd=spec["remaining_amount_usd"],
+            freelancer_email=spec["freelancer_email"],
+            freelancer_phone=spec["worker_me_id"],
+            worker_me_id=spec["worker_me_id"],
+            sponsor_me_id=spec["sponsor_me_id"],
+            tracking_number=spec.get("tracking_number"),
+            shipping_status=spec.get("shipping_status", "NOT_SHIPPED"),
+            status=spec["status"],
+            requires_human_approval=bool(spec.get("requires_human_approval", False)),
+            risk_score=spec.get("risk_score", "LOW"),
+            risk_percentage=spec.get("risk_percentage", 15),
+            risk_factors=spec.get("risk_factors", []),
+            risk_updated_at=now_iso,
+            escrow_provider=models.EscrowProvider.PAYPAL,
+        )
+        db.add(bounty)
+        db.flush()
+
+        for m_spec in spec["milestones"]:
+            m = models.Milestone(
+                bounty_id=bounty.id,
+                description=m_spec["description"],
+                deadline=m_spec["deadline"],
+                percentage=m_spec["percentage"],
+                amount_usd=m_spec["amount_usd"],
+                status=m_spec["status"],
+                criteria_strings=m_spec.get("criteria_strings", []),
+                requires_human_approval=bool(m_spec.get("requires_human_approval", False)),
+                tracking_number=m_spec.get("tracking_number"),
+                shipping_status=m_spec.get("shipping_status", "NOT_SHIPPED"),
+                paypal_payout_batch_id=m_spec.get("paypal_payout_batch_id"),
+                submitted_github_url=m_spec.get("submitted_github_url"),
+                submission_notes=m_spec.get("submission_notes"),
+                audit_result=m_spec.get("audit_result"),
+                audited_at=m_spec.get("audited_at"),
+            )
+            db.add(m)
+
+        created_titles.append(spec["title"])
+
+    db.commit()
+    return {
+        "status": "seeded",
+        "demo_user": {"email": demo_user.email, "me_id": demo_user.me_id, "paypal_email": demo_user.paypal_email},
+        "demo_worker": {"email": demo_worker.email, "me_id": demo_worker.me_id, "paypal_email": demo_worker.paypal_email},
+        "demo_admin": {"email": demo_admin.email, "me_id": demo_admin.me_id},
+        "created_contracts_count": len(created_titles),
+        "created_titles": created_titles,
+    }
+
+
+@app.post("/api/demo/seed", status_code=status.HTTP_200_OK)
+def trigger_demo_seed(db: Session = Depends(get_db)):
+    """Idempotently ensures demo accounts and showcase contracts exist in PostgreSQL."""
+    return seed_demo_showcase_data(db)
 
 
 
