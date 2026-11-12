@@ -38,6 +38,70 @@ def get_access_token() -> str:
     return response.json()["access_token"]
 
 
+def create_order(
+    amount: float,
+    custom_id: str | None = None,
+    description: str | None = None,
+    currency: str = "USD",
+) -> dict:
+    """
+    Calls POST /v2/checkout/orders to create a PayPal v2 sandbox/live order
+    with intent=CAPTURE for milestone escrow funding.
+    """
+    token = get_access_token()
+    url = f"{PAYPAL_BASE_URL}/v2/checkout/orders"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+
+    purchase_unit: dict = {
+        "amount": {
+            "currency_code": currency.upper(),
+            "value": f"{float(amount):.2f}",
+        }
+    }
+    if custom_id is not None:
+        purchase_unit["custom_id"] = str(custom_id)
+    if description:
+        purchase_unit["description"] = str(description)[:127]
+
+    payload = {
+        "intent": "CAPTURE",
+        "purchase_units": [purchase_unit],
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def capture_order(order_id: str) -> dict:
+    """
+    Calls POST /v2/checkout/orders/{order_id}/capture to capture a buyer-approved order.
+    """
+    token = get_access_token()
+    url = f"{PAYPAL_BASE_URL}/v2/checkout/orders/{order_id}/capture"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+
+    response = requests.post(url, headers=headers, json={}, timeout=15)
+    if response.status_code in (200, 201):
+        return response.json()
+
+    try:
+        err_json = response.json()
+        if "ORDER_ALREADY_CAPTURED" in str(err_json):
+            return {"id": order_id, "status": "COMPLETED", "note": "already_captured"}
+    except Exception:
+        pass
+
+    response.raise_for_status()
+    return response.json()
+
+
 def authorize_order(order_id: str) -> str:
     """
     Calls POST /v2/checkout/orders/{order_id}/authorize to lock the funds.

@@ -22,6 +22,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 from database import get_db, engine, SessionLocal
 import models
 from paypal_client import (
+    create_order,
+    capture_order,
     authorize_order,
     capture_authorization,
     execute_payout,
@@ -1605,28 +1607,47 @@ def create_bounty(
         # Bulk insert the associated Milestones
         db.bulk_insert_mappings(models.Milestone, milestone_mappings)
 
-        # 4. Commit the transaction and return the newly generated Bounty.id
+        # 4. Commit the transaction and return the newly generated Bounty.id + Milestone IDs
         db.commit()
+
+        created_milestones = (
+            db.query(models.Milestone)
+            .filter(models.Milestone.bounty_id == bounty_id)
+            .order_by(models.Milestone.id.asc())
+            .all()
+        )
 
         logger.info(
             "[Bounty Creation] Created Bounty #%d (%s) with %d milestones for Worker %s",
-            bounty_id, bounty_in.title, len(milestone_mappings), worker_id
+            bounty_id, bounty_in.title, len(created_milestones), canonical_worker_id
         )
 
         return {
             "id": bounty_id,
             "bounty_id": bounty_id,
-            "worker_me_id": worker_id,
-            "sponsor_me_id": sponsor_id,
+            "worker_me_id": canonical_worker_id,
+            "sponsor_me_id": canonical_sponsor_id,
             "total_budget": total_budget_val,
             "amount_usd": total_budget_val,
             "requires_human_approval": is_high_value,
             "is_high_value": is_high_value,
             "authorization_ids": auth_ids,
-            "freelancer_phone": worker_id,
+            "freelancer_phone": canonical_worker_id,
             "tracking_number": new_bounty.tracking_number,
             "shipping_status": new_bounty.shipping_status,
-            "milestones_count": len(milestone_mappings),
+            "milestones_count": len(created_milestones),
+            "milestones": [
+                {
+                    "id": m.id,
+                    "bounty_id": m.bounty_id,
+                    "description": m.description,
+                    "deadline": m.deadline,
+                    "percentage": m.percentage,
+                    "amount_usd": m.amount_usd,
+                    "status": m.status,
+                }
+                for m in created_milestones
+            ],
             "status": "LOCKED",
             "escrow_provider": new_bounty.escrow_provider.value if hasattr(new_bounty.escrow_provider, "value") else str(new_bounty.escrow_provider),
             "currency": (bounty_in.currency or "USD").upper(),
@@ -3860,5 +3881,158 @@ async def github_webhook(request: Request):
         return {"status": "processing"}
 
     return {"status": "ignored", "action": action}
+
+
+# =====================================================================
+# MILESTONE PAYPAL ORDER CREATION & CAPTURE (LIVE FRONTEND CHECKOUT)
+# =====================================================================
+
+@app.post("/api/milestones/{milestone_id}/create-order")
+async def create_milestone_paypal_order(
+    milestone_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    Creates a PayPal v2 sandbox/live order for funding a specific milestone.
+    """
+    try:
+        milestone = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    except Exception as db_err:
+        logger.error("[PayPal Create Order] Database lookup failed for milestone #%s: %s", milestone_id, db_err)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while verifying milestone.",
+        )
+
+    if not milestone:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Milestone #{milestone_id} not found in PostgreSQL database. "
+                "The contract/milestone may not be persisted or synced yet."
+            ),
+        )
+
+    raw_amount = payload.get("amount") if isinstance(payload, dict) else None
+    if raw_amount is None:
+        raw_amount = milestone.amount_usd
+
+    try:
+        amount_val = float(raw_amount)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid 'amount' value provided for PayPal order creation.",
+        )
+
+    if amount_val <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Order amount must be greater than 0.",
+        )
+
+    try:
+        order_data = create_order(
+            amount=amount_val,
+            custom_id=str(milestone.id),
+            description=milestone.description or f"Milestone #{milestone.id} Escrow Funding",
+        )
+        paypal_order_id = order_data.get("id")
+        if not paypal_order_id:
+            raise ValueError(f"PayPal API returned an order payload without an 'id': {order_data}")
+
+        logger.info(
+            "[PayPal Create Order] Created PayPal Order %s for Milestone #%d ($%.2f USD)",
+            paypal_order_id, milestone.id, amount_val,
+        )
+        return {"order_id": paypal_order_id}
+    except ValueError as val_err:
+        logger.error("[PayPal Create Order] Configuration/Response error: %s", val_err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(val_err),
+        )
+    except requests.HTTPError as http_err:
+        err_text = http_err.response.text if http_err.response is not None else str(http_err)
+        logger.error("[PayPal Create Order] PayPal API HTTP error: %s", err_text)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"PayPal API error creating order: {err_text}",
+        )
+    except Exception as exc:
+        logger.error("[PayPal Create Order] Unexpected error: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create PayPal order: {str(exc)}",
+        )
+
+
+@app.post("/api/milestones/{milestone_id}/capture-order")
+async def capture_milestone_paypal_order(
+    milestone_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    Captures an approved PayPal v2 order for a specific milestone and marks it FUNDED.
+    """
+    try:
+        milestone = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    except Exception as db_err:
+        logger.error("[PayPal Capture Order] Database lookup failed for milestone #%s: %s", milestone_id, db_err)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while verifying milestone.",
+        )
+
+    if not milestone:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Milestone #{milestone_id} not found in PostgreSQL database.",
+        )
+
+    order_id = (payload.get("order_id") or payload.get("orderID") or "").strip() if isinstance(payload, dict) else ""
+    if not order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing 'order_id' or 'orderID' in capture request payload.",
+        )
+
+    try:
+        capture_res = capture_order(order_id)
+        milestone.status = "FUNDED"
+        if milestone.bounty and milestone.bounty.status in ("AWAITING_FUNDS", None):
+            milestone.bounty.status = "LOCKED"
+            db.add(milestone.bounty)
+        db.add(milestone)
+        db.commit()
+
+        logger.info(
+            "[PayPal Capture Order] Captured Order %s for Milestone #%d -> FUNDED",
+            order_id, milestone.id,
+        )
+        return {
+            "status": "FUNDED",
+            "milestone_id": milestone.id,
+            "order_id": order_id,
+            "capture": capture_res,
+        }
+    except requests.HTTPError as http_err:
+        db.rollback()
+        err_text = http_err.response.text if http_err.response is not None else str(http_err)
+        logger.error("[PayPal Capture Order] PayPal API HTTP error: %s", err_text)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"PayPal API error capturing order: {err_text}",
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error("[PayPal Capture Order] Unexpected error: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to capture PayPal order: {str(exc)}",
+        )
+
 
 
