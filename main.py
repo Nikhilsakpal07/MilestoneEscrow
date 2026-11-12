@@ -611,8 +611,9 @@ def list_bounties(
 
     query = db.query(models.Bounty)
 
+    clean_me_id_lower = clean_me_id.lower()
     is_demo = (
-        clean_me_id in ["ME-8492-X", "ME-SPON-8492"]
+        clean_me_id.upper() in ["ME-8492-X", "ME-SPON-8492"]
         or "alex.chen" in clean_email
         or "fintech-dev.io" in clean_email
         or "admin@compliance" in clean_email
@@ -622,18 +623,18 @@ def list_bounties(
         conditions = []
         if role == "sponsor":
             if clean_me_id:
-                conditions.append(models.Bounty.sponsor_me_id == clean_me_id)
+                conditions.append(func.lower(models.Bounty.sponsor_me_id) == clean_me_id_lower)
         elif role == "worker":
             if clean_me_id:
-                conditions.append(models.Bounty.worker_me_id == clean_me_id)
-                conditions.append(models.Bounty.freelancer_phone == clean_me_id)
+                conditions.append(func.lower(models.Bounty.worker_me_id) == clean_me_id_lower)
+                conditions.append(func.lower(models.Bounty.freelancer_phone) == clean_me_id_lower)
             if clean_email:
                 conditions.append(func.lower(models.Bounty.freelancer_email) == clean_email)
         else:
             if clean_me_id:
-                conditions.append(models.Bounty.sponsor_me_id == clean_me_id)
-                conditions.append(models.Bounty.worker_me_id == clean_me_id)
-                conditions.append(models.Bounty.freelancer_phone == clean_me_id)
+                conditions.append(func.lower(models.Bounty.sponsor_me_id) == clean_me_id_lower)
+                conditions.append(func.lower(models.Bounty.worker_me_id) == clean_me_id_lower)
+                conditions.append(func.lower(models.Bounty.freelancer_phone) == clean_me_id_lower)
             if clean_email:
                 conditions.append(func.lower(models.Bounty.freelancer_email) == clean_email)
 
@@ -1077,39 +1078,42 @@ def verify_user_me_id(
     if not clean_id:
         raise HTTPException(status_code=400, detail="ME-ID is required.")
 
-    # Check users table
-    user = db.query(models.User).filter(models.User.me_id == clean_id).first()
+    # Check users table (case-insensitive)
+    clean_id_lower = clean_id.lower()
+    user = db.query(models.User).filter(func.lower(models.User.me_id) == clean_id_lower).first()
 
-    # Also check workers table
-    worker = db.query(models.Worker).filter(models.Worker.me_id == clean_id).first()
+    # Also check workers table (case-insensitive)
+    worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == clean_id_lower).first()
 
     if not user and not worker:
-        # Fallback for mock test worker ME-IDs
-        if clean_id in ["ME-8492-X", "ME-7104-B", "ME-3912-K"]:
+        # Fallback for mock test worker ME-IDs (case-insensitive)
+        if clean_id.upper() in ["ME-8492-X", "ME-7104-B", "ME-3912-K"]:
+            canonical_mock_id = clean_id.upper()
             return {
                 "valid": True,
-                "me_id": clean_id,
+                "me_id": canonical_mock_id,
                 "email": "alex.chen@fintech-dev.io",
                 "wallet_address": "0x30782F4E7A81C0E72D2e18c98f5D4A22B4f30039",
                 "kyc_status": "VERIFIED",
-                "message": f"Worker ME-ID '{clean_id}' is verified and ready for contract assignment.",
+                "message": f"Worker ME-ID '{canonical_mock_id}' is verified and ready for contract assignment.",
             }
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Worker ME-ID '{clean_id}' not found in PostgreSQL registry. Worker must register before contract assignment.",
         )
 
+    canonical_me_id = user.me_id if user else worker.me_id
     wallet_address = user.wallet_address if user else "0x0000000000000000000000000000000000000000"
     email = user.email if user else (worker.email if worker else None)
     kyc_status = worker.kyc_status.value if (worker and hasattr(worker.kyc_status, "value")) else ("VERIFIED" if user else "PENDING")
 
     return {
         "valid": True,
-        "me_id": clean_id,
+        "me_id": canonical_me_id,
         "email": email,
         "wallet_address": wallet_address,
         "kyc_status": kyc_status,
-        "message": f"Worker ME-ID '{clean_id}' is verified and ready for contract assignment.",
+        "message": f"Worker ME-ID '{canonical_me_id}' is verified and ready for contract assignment.",
     }
 
 
@@ -1154,7 +1158,7 @@ def require_verified_worker_kyc(
         )
     worker_id = str(worker_id).strip()
 
-    worker = db.query(models.Worker).filter(models.Worker.me_id == worker_id).first()
+    worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == worker_id.lower()).first()
     if not worker:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1254,7 +1258,7 @@ def get_worker_profile(
     """
     clean_id = identifier.strip()
     worker = db.query(models.Worker).filter(
-        (models.Worker.me_id == clean_id) | (models.Worker.firebase_uid == clean_id)
+        (func.lower(models.Worker.me_id) == clean_id.lower()) | (models.Worker.firebase_uid == clean_id)
     ).first()
     if not worker:
         raise HTTPException(
@@ -1363,7 +1367,7 @@ async def receive_kyc_webhook(
     # Match Worker in Database
     worker = None
     if target_me_id:
-        worker = db.query(models.Worker).filter(models.Worker.me_id == target_me_id).first()
+        worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == str(target_me_id).strip().lower()).first()
     if not worker and target_uid:
         worker = db.query(models.Worker).filter(models.Worker.firebase_uid == target_uid).first()
     if not worker and target_email:
@@ -1456,9 +1460,10 @@ def create_bounty(
     db: Session = SessionLocal()
     try:
         # Worker is pre-verified via require_verified_worker_kyc dependency
-        worker = db.query(models.Worker).filter(models.Worker.me_id == worker_id).first() or verified_worker
+        worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == worker_id.lower()).first() or verified_worker
+        canonical_worker_id = worker.me_id if worker else worker_id
 
-        sponsor = db.query(models.Sponsor).filter(models.Sponsor.me_id == sponsor_id).first()
+        sponsor = db.query(models.Sponsor).filter(func.lower(models.Sponsor.me_id) == sponsor_id.lower()).first()
         if not sponsor:
             sponsor = models.Sponsor(
                 me_id=sponsor_id,
@@ -1468,6 +1473,7 @@ def create_bounty(
             )
             db.add(sponsor)
             db.flush()
+        canonical_sponsor_id = sponsor.me_id
 
         # Resolve escrow provider enum
         provider_str = (bounty_in.escrow_provider or "PAYPAL").upper()
@@ -1483,9 +1489,9 @@ def create_bounty(
             amount_usd=total_budget_val,
             remaining_amount_usd=total_budget_val,
             freelancer_email=freelancer_email,
-            freelancer_phone=worker_id,
-            worker_me_id=worker_id,
-            sponsor_me_id=sponsor_id,
+            freelancer_phone=canonical_worker_id,
+            worker_me_id=canonical_worker_id,
+            sponsor_me_id=canonical_sponsor_id,
             tracking_number=bounty_in.tracking_number,
             shipping_status=(bounty_in.shipping_status or "NOT_SHIPPED").upper(),
             status="LOCKED",
@@ -1669,7 +1675,7 @@ async def onboard_stripe_connect(
     4. Saves the stripe_account_id to the Worker in the database.
     5. Returns the Account Link URL and account details.
     """
-    worker = db.query(models.Worker).filter(models.Worker.me_id == payload.worker_me_id.strip()).first()
+    worker = db.query(models.Worker).filter(func.lower(models.Worker.me_id) == payload.worker_me_id.strip().lower()).first()
     if not worker:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

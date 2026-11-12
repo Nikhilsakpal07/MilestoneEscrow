@@ -941,7 +941,6 @@ footer { height: 58px; border-top: 1px solid #1b1b1b; color: #464646; font-size:
 .input-me-id {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 
 .minimal-textarea {

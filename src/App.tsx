@@ -1109,21 +1109,22 @@ function Dashboard({
   const userBounties = isDemo
     ? bounties
     : bounties.filter((b) => {
-        const sponsorMeId = (b as any).sponsor_me_id || ""
+        const sponsorMeId = ((b as any).sponsor_me_id || "").trim().toLowerCase()
         const sponsorEmail = ((b as any).sponsor_email || "").toLowerCase()
         const workerEmail = (b.freelancer_email || "").toLowerCase()
-        const workerMeId = (b.worker_me_id || b.freelancer_phone || "")
+        const workerMeId = (b.worker_me_id || b.freelancer_phone || "").trim().toLowerCase()
+        const currentMeIdLower = currentMeId.trim().toLowerCase()
 
         if (viewMode === "sponsor") {
           return (
-            (sponsorMeId && sponsorMeId === currentMeId) ||
+            (sponsorMeId && sponsorMeId === currentMeIdLower) ||
             (sponsorEmail && sponsorEmail === currentEmail) ||
             (b as any).created_by_user_id === authUser?.firebase_uid ||
             (b as any).created_by_user_id === authUser?.id
           )
         } else {
           return (
-            (workerMeId && workerMeId === currentMeId) ||
+            (workerMeId && workerMeId === currentMeIdLower) ||
             (workerEmail && workerEmail === currentEmail)
           )
         }
@@ -1855,8 +1856,12 @@ function Studio({
       throw new Error(msg)
     }
 
+    let canonicalWorkerMeId = workerMeId.trim()
     try {
-      await verifyWorkerMeId(workerMeId.trim())
+      const verRes = await verifyWorkerMeId(canonicalWorkerMeId)
+      if (verRes?.me_id) {
+        canonicalWorkerMeId = verRes.me_id
+      }
     } catch (verErr: any) {
       if (typeof window !== "undefined" && (window as any).__E2E_MODE__) {
         // E2E testing mock verification
@@ -1926,8 +1931,8 @@ function Studio({
         amount_usd: budgetNum,
         remaining_amount_usd: budgetNum,
         freelancer_email: workerEmail.trim(),
-        freelancer_phone: workerMeId.trim(),
-        worker_me_id: workerMeId.trim(),
+        freelancer_phone: canonicalWorkerMeId,
+        worker_me_id: canonicalWorkerMeId,
         sponsor_me_id: currentMeId,
         sponsor_email: currentEmail || "alex.chen@fintech-dev.io",
         status: "LOCKED",
@@ -1952,13 +1957,13 @@ function Studio({
           acceptance_criteria: finalCriteria.trim(),
           total_budget: budgetNum,
           amount_usd: budgetNum,
-          worker_me_id: workerMeId.trim(),
-          workerMeId: workerMeId.trim(),
+          worker_me_id: canonicalWorkerMeId,
+          workerMeId: canonicalWorkerMeId,
           sponsor_me_id: currentMeId,
           sponsor_email: currentEmail || "alex.chen@fintech-dev.io",
           created_by_user_id: authUser?.firebase_uid || authUser?.id,
           freelancer_email: workerEmail.trim(),
-          freelancer_phone: workerMeId.trim(),
+          freelancer_phone: canonicalWorkerMeId,
           shipping_status: isDonation ? "PHYSICAL_RECEIPT" : "NOT_SHIPPED",
           tracking_number: isDonation ? "REC-" + Math.floor(100000 + Math.random() * 900000) : undefined,
           paypal_order_id: "ESCROW-" + Math.random().toString(36).substring(2, 9).toUpperCase(),
@@ -2159,7 +2164,7 @@ function Studio({
                     placeholder="e.g. ME-8492-X"
                     value={workerMeId}
                     onChange={(e) => {
-                      const val = e.target.value.toUpperCase()
+                      const val = e.target.value
                       setWorkerMeId(val)
                       if (workerMeIdStatus) setWorkerMeIdStatus(null)
                     }}
