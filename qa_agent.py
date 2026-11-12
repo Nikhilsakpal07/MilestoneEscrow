@@ -1068,3 +1068,350 @@ Ensure the sum of milestone percentages strictly equals 100.0. Do not output any
     response_text = response.text or ""
     print(f"[AI Negotiation Agent] Compromise received ({len(response_text)} chars). Parsing JSON...")
     return _parse_agent_json(response_text)
+
+
+def _extract_raw_json_dict(text: str) -> dict:
+    """Extracts the last valid JSON object from model output without stripping custom keys."""
+    clean = (text or "").strip()
+    try:
+        parsed = json.loads(clean)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    code_blocks = re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", clean)
+    for block in reversed(code_blocks):
+        try:
+            parsed = json.loads(block)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+
+    last_brace = clean.rfind("}")
+    if last_brace != -1:
+        depth = 0
+        for i in range(last_brace, -1, -1):
+            if clean[i] == "}":
+                depth += 1
+            elif clean[i] == "{":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        parsed = json.loads(clean[i : last_brace + 1])
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        break
+
+    raise ValueError("Could not extract structured JSON from Gemini audit response.")
+
+
+async def fetch_public_github_context(github_url: str) -> dict[str, Any]:
+    """
+    Fetches real public repository / Pull Request metadata, README, recent commits,
+    and changed/key source files via the GitHub REST API (no local cloning or fake data).
+    """
+    import httpx
+
+    clean_url = (github_url or "").strip()
+    parsed = parse_github_url(clean_url)
+    owner = parsed.get("owner") or ""
+    repo = parsed.get("repo") or ""
+    pull_number = parsed.get("pull_number")
+
+    telemetry: dict[str, Any] = {
+        "github_url": clean_url,
+        "owner": owner,
+        "repo": repo,
+        "pull_number": pull_number,
+        "commit_sha": None,
+        "commit_message": None,
+        "files_inspected": 0,
+        "file_names": [],
+        "fetch_status": "non_github_url" if not (owner and repo) else "ok",
+        "fetch_error": None,
+        "context_text": "",
+    }
+
+    if not owner or not repo:
+        telemetry["context_text"] = (
+            f"Submitted URL is not a standard GitHub owner/repo URL: {clean_url}"
+        )
+        return telemetry
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "MilestoneEscrow-AI-Auditor",
+    }
+    gh_token = os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_TEST_TOKEN")
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+
+    api_base = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
+    sections: list[str] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cli:
+            if pull_number:
+                pr_resp = await cli.get(f"{api_base}/repos/{owner}/{repo}/pulls/{pull_number}", headers=headers)
+                if pr_resp.status_code == 200:
+                    pr_json = pr_resp.json()
+                    telemetry["commit_sha"] = (pr_json.get("head") or {}).get("sha")
+                    telemetry["commit_message"] = pr_json.get("title")
+                    sections.append(
+                        f"Pull Request #{pull_number} ({owner}/{repo}): {pr_json.get('title')}\n"
+                        f"State: {pr_json.get('state')} | Merged: {pr_json.get('merged')} | "
+                        f"Head SHA: {telemetry['commit_sha']}\n"
+                        f"Changed Files: {pr_json.get('changed_files')} (+{pr_json.get('additions')}/-{pr_json.get('deletions')})\n"
+                        f"PR Description:\n{(pr_json.get('body') or '')[:2000]}"
+                    )
+                elif pr_resp.status_code == 404:
+                    telemetry["fetch_status"] = "not_found"
+                    telemetry["fetch_error"] = f"GitHub PR {owner}/{repo}#{pull_number} not found or private (404)."
+                elif pr_resp.status_code == 403:
+                    telemetry["fetch_status"] = "rate_limited"
+                    telemetry["fetch_error"] = "GitHub REST API rate-limit or permission error (403)."
+                else:
+                    telemetry["fetch_status"] = "error"
+                    telemetry["fetch_error"] = f"GitHub API returned HTTP {pr_resp.status_code}."
+
+                files_resp = await cli.get(
+                    f"{api_base}/repos/{owner}/{repo}/pulls/{pull_number}/files?per_page=15",
+                    headers=headers,
+                )
+                if files_resp.status_code == 200:
+                    pr_files = files_resp.json() or []
+                    telemetry["files_inspected"] = len(pr_files)
+                    telemetry["file_names"] = [f.get("filename") for f in pr_files if f.get("filename")]
+                    for f in pr_files[:10]:
+                        fname = f.get("filename", "unknown")
+                        patch = (f.get("patch") or "")[:1500]
+                        sections.append(
+                            f"--- {fname} ({f.get('status')}, +{f.get('additions')}/-{f.get('deletions')}) ---\n{patch}"
+                        )
+            else:
+                repo_resp = await cli.get(f"{api_base}/repos/{owner}/{repo}", headers=headers)
+                if repo_resp.status_code == 200:
+                    rj = repo_resp.json()
+                    sections.append(
+                        f"Repository: {rj.get('full_name')}\n"
+                        f"Description: {rj.get('description') or 'None'}\n"
+                        f"Primary Language: {rj.get('language') or 'Unknown'} | Default Branch: {rj.get('default_branch')}\n"
+                        f"Last Pushed: {rj.get('pushed_at')}"
+                    )
+                elif repo_resp.status_code == 404:
+                    telemetry["fetch_status"] = "not_found"
+                    telemetry["fetch_error"] = f"GitHub repository {owner}/{repo} not found or private (404)."
+                elif repo_resp.status_code == 403:
+                    telemetry["fetch_status"] = "rate_limited"
+                    telemetry["fetch_error"] = "GitHub REST API rate-limit or permission error (403)."
+                else:
+                    telemetry["fetch_status"] = "error"
+                    telemetry["fetch_error"] = f"GitHub API returned HTTP {repo_resp.status_code}."
+
+                commits_resp = await cli.get(
+                    f"{api_base}/repos/{owner}/{repo}/commits?per_page=5",
+                    headers=headers,
+                )
+                if commits_resp.status_code == 200:
+                    commits = commits_resp.json() or []
+                    if commits:
+                        head = commits[0]
+                        telemetry["commit_sha"] = head.get("sha")
+                        telemetry["commit_message"] = ((head.get("commit") or {}).get("message") or "").splitlines()[0]
+                        commit_lines = [
+                            f"- {(c.get('sha') or '')[:7]}: {((c.get('commit') or {}).get('message') or '').splitlines()[0]}"
+                            for c in commits[:5]
+                        ]
+                        sections.append("Recent Commits:\n" + "\n".join(commit_lines))
+
+                readme_headers = {**headers, "Accept": "application/vnd.github.raw"}
+                readme_resp = await cli.get(f"{api_base}/repos/{owner}/{repo}/readme", headers=readme_headers)
+                if readme_resp.status_code == 200 and readme_resp.text:
+                    sections.append(f"README.md (excerpt):\n{readme_resp.text[:3000]}")
+
+                tree_resp = await cli.get(f"{api_base}/repos/{owner}/{repo}/contents", headers=headers)
+                if tree_resp.status_code == 200 and isinstance(tree_resp.json(), list):
+                    entries = tree_resp.json()
+                    top_names = [f"{e.get('name')} ({e.get('type')})" for e in entries[:25]]
+                    sections.append("Top-Level Files:\n" + ", ".join(top_names))
+
+                    code_exts = (".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".json", ".toml", ".md")
+                    inspected_names: list[str] = []
+                    for entry in entries:
+                        if len(inspected_names) >= 4:
+                            break
+                        if entry.get("type") != "file":
+                            continue
+                        ename = entry.get("name", "")
+                        if not ename.lower().endswith(code_exts) or ename.lower() == "readme.md":
+                            continue
+                        dl_url = entry.get("download_url")
+                        if not dl_url:
+                            continue
+                        try:
+                            f_resp = await cli.get(dl_url)
+                            if f_resp.status_code == 200:
+                                inspected_names.append(ename)
+                                sections.append(f"--- File: {ename} ---\n{f_resp.text[:2200]}")
+                        except Exception:
+                            continue
+
+                    telemetry["file_names"] = inspected_names
+                    telemetry["files_inspected"] = len(inspected_names)
+    except Exception as exc:
+        telemetry["fetch_status"] = "error"
+        telemetry["fetch_error"] = f"GitHub fetch failed: {str(exc)}"
+
+    if not sections and telemetry["fetch_error"]:
+        sections.append(f"GitHub Fetch Diagnostic: {telemetry['fetch_error']}")
+
+    telemetry["context_text"] = "\n\n".join(sections)
+    return telemetry
+
+
+async def audit_milestone_deliverable(
+    *,
+    bounty_title: str,
+    acceptance_criteria: str,
+    milestone_id: int,
+    milestone_description: str,
+    milestone_deadline: str | None = None,
+    criteria_strings: list[str] | None = None,
+    github_url: str | None = None,
+    submission_notes: str | None = None,
+    stream: bool = False,
+    on_chunk: Any = None,
+) -> dict[str, Any]:
+    """
+    Real AI Auditor using GitHub REST API evidence + Google Gemini API (GEMINI_API_KEY)
+    to return structured JSON:
+      { passed, score, criteria_results, summary, telemetry }.
+    """
+    from google import genai
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not configured on the backend.")
+
+    gh_telemetry: dict[str, Any] = {
+        "github_url": (github_url or "").strip() or None,
+        "commit_sha": None,
+        "commit_message": None,
+        "files_inspected": 0,
+        "file_names": [],
+        "fetch_status": "not_provided" if not github_url else "ok",
+        "fetch_error": None,
+        "context_text": "",
+    }
+    if github_url and github_url.strip():
+        gh_telemetry = await fetch_public_github_context(github_url.strip())
+
+    criteria_list_text = (
+        "\n".join(f"- {c}" for c in (criteria_strings or []) if c)
+        if criteria_strings
+        else "Derive individual verifiable criteria from the Acceptance Criteria and Milestone Description above."
+    )
+
+    prompt = f"""You are the Autonomous AI Code & Deliverable Auditor for MilestoneEscrow.
+Evaluate the worker's actual submission objectively against the contract and milestone requirements.
+Do NOT invent commit hashes, invoices, or test results that do not appear in the submission evidence below.
+
+=== CONTRACT & MILESTONE REQUIREMENTS ===
+Contract Title: {bounty_title}
+Milestone #{milestone_id} Description: {milestone_description}
+Milestone Deadline: {milestone_deadline or 'Not specified'}
+Contract Acceptance Criteria:
+{acceptance_criteria or 'Not specified'}
+
+Specific Criteria List:
+{criteria_list_text}
+
+=== WORKER DELIVERABLE SUBMISSION ===
+Submitted GitHub URL: {gh_telemetry.get('github_url') or 'None provided'}
+Worker Submission Notes: {submission_notes or 'None provided'}
+
+=== FETCHED GITHUB REPOSITORY / PR TELEMETRY ===
+Fetch Status: {gh_telemetry.get('fetch_status')}
+{f"Fetch Error: {gh_telemetry.get('fetch_error')}" if gh_telemetry.get('fetch_error') else ''}
+{gh_telemetry.get('context_text') or 'No repository telemetry retrieved.'}
+
+=== EVALUATION INSTRUCTIONS ===
+1. Evaluate each requirement strictly using ONLY the fetched GitHub repository/PR evidence and the worker's submission notes.
+2. If the repository returned 404 / empty / unreachable or fails to implement the milestone requirements, score accordingly and mark `passed: false` with clear evidence explaining what is missing or unverified.
+3. Return ONLY a valid raw JSON object matching this exact schema:
+{{
+  "passed": true or false,
+  "score": integer between 0 and 100,
+  "summary": "Concise executive audit verdict summarizing evidence observed and why the deliverable passed or failed.",
+  "criteria_results": [
+    {{
+      "criterion": "Name of specific acceptance requirement",
+      "passed": true or false,
+      "metric": "VERIFIED | PARTIAL | MISSING | FAILED",
+      "evidence": "Concrete observation from the fetched repo/PR or submission notes"
+    }}
+  ]
+}}
+"""
+
+    client = genai.Client(api_key=api_key)
+    preferred_model = os.getenv("GEMINI_AUDIT_MODEL") or os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
+    response = _generate_with_gemini(
+        client,
+        prompt,
+        preferred_model=preferred_model,
+        stream=stream,
+        on_chunk=on_chunk,
+    )
+    raw_text = getattr(response, "text", "") or ""
+    parsed = _extract_raw_json_dict(raw_text)
+
+    passed = bool(parsed.get("passed", False))
+    try:
+        score = int(round(float(parsed.get("score", 100 if passed else 0))))
+    except (TypeError, ValueError):
+        score = 100 if passed else 0
+    score = max(0, min(100, score))
+
+    summary = str(parsed.get("summary") or parsed.get("feedback") or "").strip() or (
+        "Deliverable verified against milestone acceptance criteria."
+        if passed
+        else "Deliverable did not satisfy all milestone acceptance criteria."
+    )
+
+    raw_criteria = parsed.get("criteria_results") or []
+    normalized_criteria: list[dict[str, Any]] = []
+    if isinstance(raw_criteria, list):
+        for item in raw_criteria:
+            if not isinstance(item, dict):
+                continue
+            c_passed = bool(item.get("passed", False))
+            normalized_criteria.append({
+                "criterion": str(item.get("criterion") or item.get("text") or "Contract Requirement").strip(),
+                "passed": c_passed,
+                "metric": str(item.get("metric") or ("VERIFIED" if c_passed else "MISSING")).strip(),
+                "evidence": str(item.get("evidence") or item.get("detail") or "").strip(),
+            })
+
+    return {
+        "passed": passed,
+        "score": score,
+        "summary": summary,
+        "feedback": summary,
+        "criteria_results": normalized_criteria,
+        "telemetry": {
+            "github_url": gh_telemetry.get("github_url"),
+            "commit_sha": gh_telemetry.get("commit_sha"),
+            "commit_message": gh_telemetry.get("commit_message"),
+            "files_inspected": gh_telemetry.get("files_inspected", 0),
+            "file_names": gh_telemetry.get("file_names", []),
+            "fetch_status": gh_telemetry.get("fetch_status"),
+            "fetch_error": gh_telemetry.get("fetch_error"),
+            "submission_notes": (submission_notes or "").strip() or None,
+            "model": preferred_model,
+        },
+    }

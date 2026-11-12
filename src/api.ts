@@ -21,6 +21,32 @@ export async function fetchWithTimeout(
   }
 }
 
+export interface AuditCriterionResult {
+  criterion: string
+  passed: boolean
+  metric?: string
+  evidence: string
+}
+
+export interface MilestoneAuditResult {
+  passed: boolean
+  score: number
+  summary: string
+  criteria_results: AuditCriterionResult[]
+  telemetry?: {
+    github_url?: string | null
+    commit_sha?: string | null
+    commit_message?: string | null
+    files_inspected?: number
+    file_names?: string[]
+    fetch_status?: string | null
+    fetch_error?: string | null
+    submission_notes?: string | null
+    model?: string | null
+  }
+  audited_at?: string | null
+}
+
 export interface MilestoneData {
   id: number
   description: string
@@ -28,6 +54,7 @@ export interface MilestoneData {
   percentage: number
   amount_usd: number
   status: string
+  criteria_strings?: string[]
   authorization_ids?: string[]
   tracking_number?: string
   shipping_status?: string
@@ -35,6 +62,10 @@ export interface MilestoneData {
   certificate_id?: string
   has_certificate?: boolean
   requires_human_approval?: boolean
+  submitted_github_url?: string | null
+  submission_notes?: string | null
+  audit_result?: MilestoneAuditResult | null
+  audited_at?: string | null
 }
 
 export interface BountyData {
@@ -120,7 +151,7 @@ export async function createBounty(payload: any) {
 export async function submitWork(
   bountyId: number,
   milestoneId: number,
-  payload: { github_url?: string; file?: File }
+  payload: { github_url?: string; submission_notes?: string; file?: File }
 ) {
   let body: any
   let headers: HeadersInit = {}
@@ -130,11 +161,13 @@ export async function submitWork(
     formData.append("file", payload.file)
     formData.append("milestone_id", String(milestoneId))
     if (payload.github_url) formData.append("github_url", payload.github_url)
+    if (payload.submission_notes) formData.append("submission_notes", payload.submission_notes)
     body = formData
   } else {
     headers["Content-Type"] = "application/json"
     body = JSON.stringify({
       github_url: payload.github_url,
+      submission_notes: payload.submission_notes,
       milestone_id: milestoneId,
     })
   }
@@ -151,6 +184,30 @@ export async function submitWork(
   const data = await res.json()
   if (!res.ok && res.status !== 400) {
     throw new Error(data.detail || "Failed to audit submission")
+  }
+  return data
+}
+
+/**
+ * Trigger real GitHub + Gemini deliverable audit on a specific milestone
+ * and persist structured audit_result to PostgreSQL.
+ */
+export async function auditMilestone(
+  milestoneId: number,
+  payload: { github_url?: string; submission_notes?: string }
+) {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/milestones/${milestoneId}/audit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    45000
+  )
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || "Failed to run Gemini AI audit.")
   }
   return data
 }

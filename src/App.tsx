@@ -24,10 +24,12 @@ import {
   API_BASE,
   type BountyData,
   type MilestoneData,
+  type MilestoneAuditResult,
   getBounties,
   generateScopeAI,
   createBounty,
   submitWork,
+  auditMilestone,
   submitAppeal,
   runPredictiveRiskEngine,
   adminApproveMilestone,
@@ -570,14 +572,6 @@ const DEFAULT_PORTFOLIO_CONTRACTS: BountyData[] = [
    WIDE "AI AUDIT & NEGOTIATION HUB" SPLIT-SCREEN MODAL
    Pitch-black background (#000000), stark white text, sharp 1px #333 borders
    ========================================================================= */
-interface CriteriaChecklistItem {
-  id: string
-  text: string
-  passed: boolean
-  metric: string
-  detail: string
-}
-
 function AuditNegotiationModal({
   bounty,
   isOpen,
@@ -591,24 +585,37 @@ function AuditNegotiationModal({
   onAppealSubmitted?: (appealText: string) => void
   onCompromiseRatified?: () => void
 }) {
+  const milestones = bounty.milestones || []
+  const [selectedMilestoneIdx, setSelectedMilestoneIdx] = useState(0)
+  const activeMilestone: MilestoneData | undefined = milestones[selectedMilestoneIdx] || milestones[0]
+
+  const [localAudit, setLocalAudit] = useState<MilestoneAuditResult | null>(
+    activeMilestone?.audit_result || null
+  )
+  const [githubInput, setGithubInput] = useState(activeMilestone?.submitted_github_url || "")
+  const [notesInput, setNotesInput] = useState(activeMilestone?.submission_notes || "")
+  const [runningAudit, setRunningAudit] = useState(false)
+
   const [appealText, setAppealText] = useState("")
   const [isSubmittingAppeal, setIsSubmittingAppeal] = useState(false)
-  const [isRatifying, setIsRatifying] = useState(false)
+  const [appealOutcome, setAppealOutcome] = useState<any>(null)
   const [notification, setNotification] = useState<{ type: "success" | "info"; msg: string } | null>(null)
   const [streamChunks, setStreamChunks] = useState<string[]>([])
   const [astProgress, setAstProgress] = useState<string | null>(null)
   const [isLiveStreaming, setIsLiveStreaming] = useState(false)
 
-  // Interactive toggle to inspect both REJECTED and PASSED states as requested
-  const [verdictState, setVerdictState] = useState<"rejected" | "passed">(
-    bounty.status === "COMPLETED" ? "passed" : "rejected"
-  )
+  useEffect(() => {
+    setLocalAudit(activeMilestone?.audit_result || null)
+    setGithubInput(activeMilestone?.submitted_github_url || "")
+    setNotesInput(activeMilestone?.submission_notes || "")
+  }, [activeMilestone?.id, activeMilestone?.audit_result, activeMilestone?.submitted_github_url, activeMilestone?.submission_notes])
 
   useEffect(() => {
-    if (!isOpen) return
-    const targetMilestoneId = bounty.milestones?.[0]?.id || 1
-    const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:"
-    const wsUrl = `${wsProto}//localhost:8000/api/ws/audit-stream/${targetMilestoneId}`
+    if (!isOpen || !activeMilestone?.id) return
+    const wsBase = API_BASE.replace(/^http/i, (proto) =>
+      proto.toLowerCase() === "https" ? "wss" : "ws"
+    )
+    const wsUrl = `${wsBase}/api/ws/audit-stream/${activeMilestone.id}`
     let ws: WebSocket | null = null
 
     try {
@@ -624,8 +631,9 @@ function AuditNegotiationModal({
             setAstProgress(data.message)
           } else if (data.type === "audit_verdict") {
             setIsLiveStreaming(false)
-            if (data.passed) setVerdictState("passed")
-            else setVerdictState("rejected")
+            if (data.audit_result) {
+              setLocalAudit(data.audit_result)
+            }
           }
         } catch (err) {
           console.warn("[Audit WS] Parse error:", err)
@@ -638,7 +646,7 @@ function AuditNegotiationModal({
     return () => {
       if (ws) ws.close()
     }
-  }, [isOpen, bounty])
+  }, [isOpen, activeMilestone?.id])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -659,72 +667,52 @@ function AuditNegotiationModal({
   const workerMeId =
     (bounty as any).worker_me_id ||
     bounty.freelancer_phone ||
-    `ME-WK-${bounty.id + 4210}`
+    "UNASSIGNED"
 
-  const isRejected = verdictState === "rejected"
+  const effectiveAudit = localAudit || activeMilestone?.audit_result || null
+  const submittedUrl = activeMilestone?.submitted_github_url || effectiveAudit?.telemetry?.github_url || null
+  const submittedNotes = activeMilestone?.submission_notes || effectiveAudit?.telemetry?.submission_notes || null
+  const hasSubmission = Boolean(submittedUrl || submittedNotes)
 
-  // Clean checklist of Acceptance Criteria
-  const checklistItems: CriteriaChecklistItem[] = isRejected
-    ? [
-        {
-          id: "cr-1",
-          text: "ISO-20022 Schema Validation & Transaction Marshaling",
-          passed: true,
-          metric: "SCHEMA_VALID",
-          detail: "All 18 XML schema definitions conform to ISO-20022 camt.053 standard.",
-        },
-        {
-          id: "cr-2",
-          text: "Zero Packet Loss Ingestion Assertions (95%+ Coverage)",
-          passed: true,
-          metric: "COVERAGE: 96.4%",
-          detail: "42 unit & integration test suites passed with zero buffer overflows.",
-        },
-        {
-          id: "cr-3",
-          text: "Sub-80ms End-to-End Gateway Settlement Latency",
-          passed: false,
-          metric: "SLA_BREACH: 142ms",
-          detail: "Burst load testing observed 142ms average latency (exceeds 80ms SLA limit).",
-        },
-        {
-          id: "cr-4",
-          text: "Automated Fallback & Cryptographic Idempotency Keys",
-          passed: false,
-          metric: "DEFICIENT",
-          detail: "Redis idempotency deduplication layer omitted in PR #42 deliverables.",
-        },
-      ]
-    : [
-        {
-          id: "cr-1",
-          text: "ISO-20022 Schema Validation & Transaction Marshaling",
-          passed: true,
-          metric: "SCHEMA_VALID",
-          detail: "All 18 XML schema definitions conform to ISO-20022 camt.053 standard.",
-        },
-        {
-          id: "cr-2",
-          text: "Zero Packet Loss Ingestion Assertions (95%+ Coverage)",
-          passed: true,
-          metric: "COVERAGE: 98.1%",
-          detail: "All test vectors cleared with 0 drop rate under 10k req/sec load.",
-        },
-        {
-          id: "cr-3",
-          text: "Sub-80ms End-to-End Gateway Settlement Latency",
-          passed: true,
-          metric: "LATENCY: 58ms",
-          detail: "Observed p99 latency 58ms across global edge endpoints.",
-        },
-        {
-          id: "cr-4",
-          text: "Automated Fallback & Cryptographic Idempotency Keys",
-          passed: true,
-          metric: "IDEMPOTENT_OK",
-          detail: "Distributed nonce caching and replay protection fully verified.",
-        },
-      ]
+  const handleRunRealAudit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!activeMilestone?.id) {
+      setNotification({ type: "info", msg: "No milestone found on this contract to audit." })
+      return
+    }
+    if (!githubInput.trim() && !notesInput.trim()) {
+      setNotification({
+        type: "info",
+        msg: "Enter a GitHub repository/PR URL or submission notes to run a real Gemini audit.",
+      })
+      return
+    }
+
+    setRunningAudit(true)
+    setNotification(null)
+    setStreamChunks([])
+    try {
+      const res = await auditMilestone(activeMilestone.id, {
+        github_url: githubInput.trim() || undefined,
+        submission_notes: notesInput.trim() || undefined,
+      })
+      if (res?.audit_result) {
+        setLocalAudit(res.audit_result)
+      }
+      setNotification({
+        type: "success",
+        msg: `Gemini audit completed (${res?.score ?? res?.audit_result?.score ?? 0}/100) and saved to PostgreSQL.`,
+      })
+      if (onCompromiseRatified) onCompromiseRatified()
+    } catch (err: any) {
+      setNotification({
+        type: "info",
+        msg: err?.message || "Failed to execute Gemini AI audit.",
+      })
+    } finally {
+      setRunningAudit(false)
+    }
+  }
 
   const handleSubmitAppeal = async () => {
     if (!appealText.trim()) {
@@ -735,30 +723,28 @@ function AuditNegotiationModal({
       return
     }
     setIsSubmittingAppeal(true)
-    setTimeout(() => {
-      setIsSubmittingAppeal(false)
+    try {
+      const res = await submitAppeal(bounty.id, activeMilestone?.id || 1, appealText.trim())
+      setAppealOutcome(res)
       setNotification({
         type: "success",
-        msg: "Appeal submitted to Gemini Dispute Arbiter. Counterparty notified for review.",
+        msg: res?.override_granted
+          ? "Dispute Mediator granted override. Payout unlocked."
+          : res?.reasoning || "Appeal reviewed by Gemini Dispute Arbiter.",
       })
       if (onAppealSubmitted) onAppealSubmitted(appealText)
-    }, 900)
+    } catch (err: any) {
+      setNotification({
+        type: "info",
+        msg: err?.message || "Failed to reach Dispute Mediator endpoint.",
+      })
+    } finally {
+      setIsSubmittingAppeal(false)
+    }
   }
 
-  const handleRatifyCompromise = async () => {
-    setIsRatifying(true)
-    setTimeout(() => {
-      setIsRatifying(false)
-      setNotification({
-        type: "success",
-        msg: "Compromise Ratified! Contract terms amended: $52,500.00 USD released, 15-day extension granted.",
-      })
-      if (onCompromiseRatified) onCompromiseRatified()
-      setTimeout(() => {
-        onClose()
-      }, 1500)
-    }, 1100)
-  }
+  const criteriaResults = effectiveAudit?.criteria_results || []
+  const passedCriteriaCount = criteriaResults.filter((c) => c.passed).length
 
   return (
     <div className="audit-modal-overlay" onClick={onClose}>
@@ -774,23 +760,20 @@ function AuditNegotiationModal({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            {/* Interactive Toggle for REJECTED vs PASSED variant previews */}
-            <div className="verdict-state-toggle" title="Switch verdict view to inspect both states">
-              <button
-                type="button"
-                className={isRejected ? "active btn-rej" : ""}
-                onClick={() => setVerdictState("rejected")}
-              >
-                Rejected View
-              </button>
-              <button
-                type="button"
-                className={!isRejected ? "active btn-pass" : ""}
-                onClick={() => setVerdictState("passed")}
-              >
-                Passed View
-              </button>
-            </div>
+            {milestones.length > 1 && (
+              <div className="verdict-state-toggle" title="Select milestone to inspect">
+                {milestones.map((m, idx) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className={idx === selectedMilestoneIdx ? "active btn-pass" : ""}
+                    onClick={() => setSelectedMilestoneIdx(idx)}
+                  >
+                    M{idx + 1}
+                  </button>
+                ))}
+              </div>
+            )}
 
             <button
               type="button"
@@ -843,22 +826,26 @@ function AuditNegotiationModal({
 
         {/* Split-Screen 2-Column Body */}
         <div className="audit-modal-grid">
-          {/* LEFT COLUMN: AI Auditor Verdict */}
+          {/* LEFT COLUMN: AI Auditor Verdict (Real Persisted Data or Pending Guard) */}
           <div className="audit-column-left">
             <div className="column-header-row">
               <div>
                 <span className="section-number">AI AUDITOR VERDICT</span>
-                <h2>Autonomous Audit Dossier</h2>
-                <p>Deliverables verified against contract acceptance criteria via AST code &amp; OCR forensics.</p>
+                <h2>{activeMilestone?.description || bounty.title}</h2>
+                <p>
+                  {effectiveAudit
+                    ? "Verified dynamically against contract requirements via GitHub telemetry & Gemini."
+                    : "Awaiting worker deliverable submission and autonomous Gemini audit."}
+                </p>
               </div>
             </div>
 
-            {/* Live Gemini AI Reasoning & AST Stream */}
+            {/* Live Gemini AI Reasoning Stream */}
             {(astProgress || streamChunks.length > 0 || isLiveStreaming) && (
               <div className="live-gemini-stream-box">
                 <div className="stream-box-header">
                   <span className="live-pulse-dot" />
-                  <span className="stream-title">LIVE GEMINI 1.5 PRO AUDIT STREAM</span>
+                  <span className="stream-title">LIVE GEMINI AI AUDIT STREAM</span>
                   {isLiveStreaming && <span className="stream-badge">STREAMING VERDICT...</span>}
                 </div>
                 {astProgress && <div className="ast-progress-line">&gt; {astProgress}</div>}
@@ -871,172 +858,281 @@ function AuditNegotiationModal({
               </div>
             )}
 
-            {/* Large Status Badge */}
-            <div>
-              {isRejected ? (
-                <div className="large-verdict-badge badge-rejected">
-                  <Icon name="close" size={18} />
-                  <span>REJECTED - Missing Requirements</span>
+            {/* State Guard: Pending Deliverable vs Real Persisted Audit */}
+            {!hasSubmission && !effectiveAudit ? (
+              <div
+                style={{
+                  border: "1px dashed #3f3f46",
+                  borderRadius: "10px",
+                  background: "rgba(24, 24, 27, 0.6)",
+                  padding: "20px",
+                  marginBottom: "16px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "8px" }}>
+                  <strong style={{ fontSize: "14px", color: "#fafafa" }}>
+                    Pending Deliverable — No submission uploaded yet
+                  </strong>
+                  <Badge tone="amber">AWAITING SUBMISSION</Badge>
                 </div>
-              ) : (
-                <div className="large-verdict-badge badge-passed">
-                  <Icon name="check" size={18} />
-                  <span>PASSED - All Acceptance Criteria Verified</span>
-                </div>
-              )}
-            </div>
-
-            {/* Clean Checklist of Original Acceptance Criteria */}
-            <div className="checklist-section">
-              <div className="checklist-section-title">
-                Acceptance Criteria Verification ({isRejected ? "2/4 Passed" : "4/4 Passed"})
+                <p style={{ fontSize: "12px", color: "#a1a1aa", lineHeight: "1.55", margin: 0 }}>
+                  This milestone has no submitted GitHub URL, deliverable notes, or stored Gemini audit dossier yet.
+                  Submit real deliverable evidence below to trigger an autonomous audit.
+                </p>
               </div>
-              <div className="criteria-checklist">
-                {checklistItems.map((item) => (
-                  <div className="criteria-checklist-item" key={item.id}>
-                    <div className={`criteria-icon-box ${item.passed ? "icon-pass" : "icon-fail"}`}>
-                      <Icon name={item.passed ? "check" : "close"} size={11} />
+            ) : !effectiveAudit ? (
+              <div
+                style={{
+                  border: "1px solid rgba(245, 158, 11, 0.35)",
+                  borderRadius: "10px",
+                  background: "rgba(245, 158, 11, 0.06)",
+                  padding: "16px",
+                  marginBottom: "16px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <strong style={{ fontSize: "13px", color: "#fbbf24" }}>
+                    Deliverable Uploaded — Audit Pending
+                  </strong>
+                  <Badge tone="amber">UNAUDITED</Badge>
+                </div>
+                {submittedUrl && (
+                  <p style={{ fontSize: "12px", color: "#e4e4e7", margin: "4px 0" }}>
+                    GitHub URL: <code>{submittedUrl}</code>
+                  </p>
+                )}
+                {submittedNotes && (
+                  <p style={{ fontSize: "12px", color: "#a1a1aa", margin: "4px 0" }}>
+                    Notes: {submittedNotes}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <>
+                {/* Real Status & Score Badge */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+                  {effectiveAudit.passed ? (
+                    <div className="large-verdict-badge badge-passed">
+                      <Icon name="check" size={18} />
+                      <span>PASSED — Score {effectiveAudit.score}/100</span>
                     </div>
-                    <div className="criteria-content">
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: "8px",
-                        }}
-                      >
-                        <span className="criteria-name">{item.text}</span>
-                        <span className={`criteria-tag ${item.passed ? "tag-pass" : "tag-fail"}`}>
-                          {item.metric}
-                        </span>
-                      </div>
-                      <span className="criteria-meta">{item.detail}</span>
+                  ) : (
+                    <div className="large-verdict-badge badge-rejected">
+                      <Icon name="close" size={18} />
+                      <span>REJECTED — Score {effectiveAudit.score}/100</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Real Summary */}
+                <div
+                  style={{
+                    border: "1px solid #27272a",
+                    borderRadius: "8px",
+                    background: "#09090b",
+                    padding: "12px 14px",
+                    fontSize: "12px",
+                    color: "#d4d4d8",
+                    lineHeight: "1.6",
+                  }}
+                >
+                  {effectiveAudit.summary}
+                </div>
+
+                {/* Real Criteria Results */}
+                {criteriaResults.length > 0 && (
+                  <div className="checklist-section">
+                    <div className="checklist-section-title">
+                      Acceptance Criteria Verification ({passedCriteriaCount}/{criteriaResults.length} Passed)
+                    </div>
+                    <div className="criteria-checklist">
+                      {criteriaResults.map((item, idx) => (
+                        <div className="criteria-checklist-item" key={`${item.criterion}-${idx}`}>
+                          <div className={`criteria-icon-box ${item.passed ? "icon-pass" : "icon-fail"}`}>
+                            <Icon name={item.passed ? "check" : "close"} size={11} />
+                          </div>
+                          <div className="criteria-content">
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "8px",
+                              }}
+                            >
+                              <span className="criteria-name">{item.criterion}</span>
+                              <span className={`criteria-tag ${item.passed ? "tag-pass" : "tag-fail"}`}>
+                                {item.metric || (item.passed ? "VERIFIED" : "FAILED")}
+                              </span>
+                            </div>
+                            <span className="criteria-meta">{item.evidence}</span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
+                )}
 
-            {/* Small Extracted Receipt / GitHub Data Summary Box */}
-            <div className="extracted-summary-box">
-              <div className="extracted-box-header">
-                <span>Extracted Receipt / GitHub Telemetry</span>
-                <Badge tone={isRejected ? "amber" : "green"}>
-                  {isRejected ? "DEFICIENCIES FLAGGED" : "SIGNATURE VALID"}
-                </Badge>
+                {/* Real Telemetry Box */}
+                <div className="extracted-summary-box">
+                  <div className="extracted-box-header">
+                    <span>Verified Submission Telemetry</span>
+                    <Badge tone={effectiveAudit.passed ? "green" : "amber"}>
+                      {effectiveAudit.passed ? "CRITERIA VERIFIED" : "DEFICIENCIES FLAGGED"}
+                    </Badge>
+                  </div>
+                  <dl className="extracted-grid">
+                    <div className="extracted-item">
+                      <dt>Repository / PR URL</dt>
+                      <dd>{submittedUrl || "Submitted via implementation notes"}</dd>
+                    </div>
+                    <div className="extracted-item">
+                      <dt>Head Commit SHA</dt>
+                      <dd>
+                        {effectiveAudit.telemetry?.commit_sha
+                          ? effectiveAudit.telemetry.commit_sha.slice(0, 12)
+                          : effectiveAudit.telemetry?.fetch_status || "No commit SHA returned"}
+                      </dd>
+                    </div>
+                    <div className="extracted-item">
+                      <dt>Files Inspected</dt>
+                      <dd>
+                        {effectiveAudit.telemetry?.files_inspected ?? 0} file(s)
+                        {effectiveAudit.telemetry?.file_names?.length
+                          ? ` (${effectiveAudit.telemetry.file_names.slice(0, 3).join(", ")})`
+                          : ""}
+                      </dd>
+                    </div>
+                    <div className="extracted-item">
+                      <dt>Audit Score &amp; Model</dt>
+                      <dd>
+                        {effectiveAudit.telemetry?.model || "Google Gemini"} &bull; {effectiveAudit.score}/100
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              </>
+            )}
+
+            {/* Direct Deliverable Submission / Re-Audit Trigger */}
+            <form
+              onSubmit={handleRunRealAudit}
+              style={{
+                marginTop: "14px",
+                borderTop: "1px solid #27272a",
+                paddingTop: "14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
+              <div style={{ fontSize: "11px", fontWeight: 600, color: "#a1a1aa", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Submit Deliverable &amp; Run Real Gemini Audit
               </div>
-              <dl className="extracted-grid">
-                <div className="extracted-item">
-                  <dt>Repository Evidence</dt>
-                  <dd>github.com/apex-fintech/settlement-core</dd>
-                </div>
-                <div className="extracted-item">
-                  <dt>Commit SHA / Head</dt>
-                  <dd>commit 8f3c49a (AST Stylometrics Clean)</dd>
-                </div>
-                <div className="extracted-item">
-                  <dt>OCR Physical Invoices</dt>
-                  <dd>REC-94812-US &bull; $60,000.00 USD Exif-OK</dd>
-                </div>
-                <div className="extracted-item">
-                  <dt>Audit Model Confidence</dt>
-                  <dd>Google Gemini 2.5 Pro &bull; 94.2% Certainty</dd>
-                </div>
-              </dl>
-            </div>
+              <input
+                type="url"
+                className="minimal-input"
+                placeholder="https://github.com/owner/repo or /pull/123"
+                value={githubInput}
+                onChange={(e) => setGithubInput(e.target.value)}
+                disabled={runningAudit}
+              />
+              <textarea
+                className="negotiation-textarea"
+                style={{ minHeight: "64px" }}
+                placeholder="Submission notes (e.g., implemented endpoints, test instructions, PR overview)..."
+                value={notesInput}
+                onChange={(e) => setNotesInput(e.target.value)}
+                disabled={runningAudit}
+              />
+              <button
+                type="submit"
+                className="modal-ratify-compromise-btn"
+                disabled={runningAudit}
+                style={{ alignSelf: "flex-start" }}
+              >
+                <Icon name="spark" size={14} />
+                {runningAudit ? "Fetching GitHub & Auditing with Gemini..." : effectiveAudit ? "Re-Run Gemini Audit" : "Submit & Run AI Audit"}
+              </button>
+            </form>
           </div>
 
-          {/* RIGHT COLUMN: AI Mediator & Negotiation */}
+          {/* RIGHT COLUMN: Contract Requirements & Dispute Mediation */}
           <div className="audit-column-right">
             <div className="column-header-row">
               <div>
-                <span className="section-number">DISPUTE MEDIATION</span>
-                <h2>Mediator AI: Scope Negotiation</h2>
-                <p>Autonomous arbitration layer formulated from contract terms, diffs, and risk models.</p>
+                <span className="section-number">CONTRACT TERMS &amp; DISPUTE MEDIATION</span>
+                <h2>Milestone Requirements &amp; Appeals</h2>
+                <p>Actual milestone terms stored in PostgreSQL with live Gemini Dispute Arbiter.</p>
               </div>
+            </div>
+
+            {/* Real Contract / Milestone Terms */}
+            <div className="ai-compromise-card">
+              <div className="compromise-card-header">
+                <div>
+                  <span className="compromise-badge">
+                    <Icon name="shield" size={13} />
+                    Active Milestone Terms
+                  </span>
+                  <div style={{ fontSize: "11px", color: "#71717a", marginTop: "3px" }}>
+                    Phase #{activeMilestone?.id ?? "—"} &bull; Status: {activeMilestone?.status || bounty.status}
+                  </div>
+                </div>
+                <Badge tone={effectiveAudit?.passed ? "green" : "amber"}>
+                  {activeMilestone?.status || bounty.status}
+                </Badge>
+              </div>
+
+              <div className="compromise-comparison-grid">
+                <div className="comparison-box original-terms">
+                  <div className="comparison-box-title">Milestone Deliverable &amp; Budget</div>
+                  <dl className="comparison-row">
+                    <dt>Delivery Deadline</dt>
+                    <dd>{activeMilestone?.deadline || "Not specified"}</dd>
+                  </dl>
+                  <dl className="comparison-row">
+                    <dt>Milestone Allocation</dt>
+                    <dd>
+                      ${(activeMilestone?.amount_usd ?? bounty.amount_usd ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2 })} USD ({activeMilestone?.percentage ?? 100}%)
+                    </dd>
+                  </dl>
+                  <dl className="comparison-row">
+                    <dt>Milestone Scope</dt>
+                    <dd>{activeMilestone?.description || bounty.title}</dd>
+                  </dl>
+                </div>
+
+                <div className="comparison-box original-terms">
+                  <div className="comparison-box-title">Contract Acceptance Criteria</div>
+                  <p style={{ fontSize: "12px", color: "#d4d4d8", lineHeight: "1.6", margin: 0 }}>
+                    {bounty.acceptance_criteria || "No acceptance criteria specified on this contract."}
+                  </p>
+                </div>
+              </div>
+
+              {appealOutcome && (
+                <div className="compromise-rationale" style={{ marginTop: "12px" }}>
+                  <strong>Mediator Decision:</strong>{" "}
+                  {appealOutcome.reasoning || appealOutcome.feedback || JSON.stringify(appealOutcome)}
+                </div>
+              )}
             </div>
 
             {/* Negotiation Interface: Text Area */}
             <div className="negotiation-field">
               <label className="negotiation-label" htmlFor="appeal-textarea">
-                Submit Appeal or Counter-Offer
+                Submit Appeal or Context for Dispute Mediator
               </label>
               <textarea
                 id="appeal-textarea"
                 className="negotiation-textarea"
-                placeholder="Explain why the automated rejection was mistaken, detail edge case exceptions, or propose amended acceptance criteria..."
+                placeholder="Explain why an automated rejection should be reconsidered or clarify implementation evidence..."
                 value={appealText}
                 onChange={(e) => setAppealText(e.target.value)}
               />
             </div>
 
-            {/* Distinct "AI Proposed Compromise" Card */}
-            <div className="ai-compromise-card">
-              <div className="compromise-card-header">
-                <div>
-                  <span className="compromise-badge">
-                    <Icon name="spark" size={13} />
-                    AI Proposed Compromise
-                  </span>
-                  <div style={{ fontSize: "11px", color: "#71717a", marginTop: "3px" }}>
-                    Recommended median settlement based on 87.5% functional deliverable parity
-                  </div>
-                </div>
-                <Badge tone="green">RECOMMENDED</Badge>
-              </div>
-
-              {/* Side-by-side comparison */}
-              <div className="compromise-comparison-grid">
-                {/* Column 1: Original Deadline & Budget */}
-                <div className="comparison-box original-terms">
-                  <div className="comparison-box-title">Original Deadline &amp; Budget</div>
-                  <dl className="comparison-row">
-                    <dt>Delivery Deadline</dt>
-                    <dd>Nov 20, 2026</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Escrow Disbursement</dt>
-                    <dd>$60,000.00 USD (100%)</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Acceptance SLA</dt>
-                    <dd>Sub-80ms Latency across all vectors</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Milestone Scope</dt>
-                    <dd>Full Gateway + Realtime Replay</dd>
-                  </dl>
-                </div>
-
-                {/* Column 2: AI Proposed Compromise */}
-                <div className="comparison-box proposed-compromise">
-                  <div className="comparison-box-title">AI Proposed Compromise</div>
-                  <dl className="comparison-row">
-                    <dt>Amended Deadline</dt>
-                    <dd className="delta-change">Dec 05, 2026 (+15 Days)</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Adjusted Disbursement</dt>
-                    <dd className="delta-change">$52,500.00 USD (87.5%)</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Adjusted SLA</dt>
-                    <dd className="delta-change">Sub-120ms accepted; 80ms in Phase 2</dd>
-                  </dl>
-                  <dl className="comparison-row">
-                    <dt>Amended Scope</dt>
-                    <dd className="delta-change">$52.5k release; $7.5k deferred to M2</dd>
-                  </dl>
-                </div>
-              </div>
-
-              <div className="compromise-rationale">
-                <strong>Mediator Rationale:</strong> Worker has delivered functional ISO-20022 parsing and passing schema tests. The 142ms latency spike is attributable to uncached Redis lookup. Compromise releases 87.5% capital immediately while deferring the remaining $7,500 to the Phase 2 optimization milestone.
-              </div>
-            </div>
-
-            {/* Actions: Two buttons at bottom */}
             <div className="negotiation-actions-row">
               <button
                 type="button"
@@ -1044,16 +1140,7 @@ function AuditNegotiationModal({
                 onClick={handleSubmitAppeal}
                 disabled={isSubmittingAppeal}
               >
-                {isSubmittingAppeal ? "Submitting..." : "Submit Appeal"}
-              </button>
-              <button
-                type="button"
-                className="modal-ratify-compromise-btn"
-                onClick={handleRatifyCompromise}
-                disabled={isRatifying}
-              >
-                <Icon name="check" size={14} />
-                {isRatifying ? "Ratifying Multi-Sig..." : "Ratify AI Compromise"}
+                {isSubmittingAppeal ? "Submitting to Mediator..." : "Submit Appeal"}
               </button>
             </div>
           </div>
@@ -1096,6 +1183,7 @@ function Dashboard({
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [selectedContract, setSelectedContract] = useState<BountyData | null>(null)
   const [githubUrl, setGithubUrl] = useState("")
+  const [submissionNotes, setSubmissionNotes] = useState("")
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [submittingAudit, setSubmittingAudit] = useState(false)
@@ -1200,6 +1288,7 @@ function Dashboard({
   const handleOpenDrawer = (contract: BountyData) => {
     setSelectedContract(contract)
     setGithubUrl("")
+    setSubmissionNotes("")
     setUploadedFile(null)
     setAuditSuccess(false)
     setAuditError(null)
@@ -1244,8 +1333,8 @@ function Dashboard({
   const handleSubmitProof = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!selectedContract) return
-    if (!githubUrl.trim() && !uploadedFile) {
-      setAuditError("Please provide a GitHub repository URL or upload a receipt/invoice document.")
+    if (!githubUrl.trim() && !submissionNotes.trim() && !uploadedFile) {
+      setAuditError("Please provide a GitHub repository URL, submission notes, or upload a receipt/invoice document.")
       return
     }
 
@@ -1255,6 +1344,7 @@ function Dashboard({
       const milestoneId = selectedContract.milestones?.[0]?.id || 1
       await submitWork(selectedContract.id, milestoneId, {
         github_url: githubUrl.trim() || undefined,
+        submission_notes: submissionNotes.trim() || undefined,
         file: uploadedFile || undefined,
       })
       setAuditSuccess(true)
@@ -1263,6 +1353,7 @@ function Dashboard({
         setAuditSuccess(false)
         setUploadedFile(null)
         setGithubUrl("")
+        setSubmissionNotes("")
         if (onRefresh) onRefresh()
       }, 1500)
     } catch (err: any) {
@@ -1605,6 +1696,23 @@ function Dashboard({
                   <span className="field-subtext">
                     Audits commits, AST structure, test assertions, and stylometric authenticity.
                   </span>
+                </div>
+
+                {/* Submission Notes input field */}
+                <div className="form-field-group">
+                  <label className="form-label" htmlFor="submissionNotesInput">
+                    <span>Submission Notes</span>
+                    <span className="field-hint">Deliverable Summary</span>
+                  </label>
+                  <textarea
+                    id="submissionNotesInput"
+                    rows={3}
+                    className="minimal-textarea"
+                    placeholder="Describe implemented modules, endpoints, and verification steps for Gemini AI Audit..."
+                    value={submissionNotes}
+                    onChange={(e) => setSubmissionNotes(e.target.value)}
+                    disabled={submittingAudit || auditSuccess}
+                  />
                 </div>
 
                 {/* Dashed-border drag-and-drop zone for Receipts/Invoices */}
@@ -2481,15 +2589,34 @@ function AuditHub({
   onBack: () => void
   onRefresh: () => void
 }) {
-  const [tab, setTab] = useState<"receipt" | "github">("receipt")
+  const [tab, setTab] = useState<"receipt" | "github">("github")
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [githubUrl, setGithubUrl] = useState("")
+  const [submissionNotes, setSubmissionNotes] = useState("")
   const [submitting, setSubmitting] = useState(false)
   const [auditResult, setAuditResult] = useState<any>(null)
   const [appealText, setAppealText] = useState("")
   const [appealResult, setAppealResult] = useState<any>(null)
   const [hubModalOpen, setHubModalOpen] = useState(false)
   const fraudRef = useRef<HTMLDivElement>(null)
+
+  const initialMilestone = bounty?.milestones?.[0]
+  const isSybilDetected = Boolean(
+    auditResult?.sybil_detected || bounty?.status === "fraud_review_pending"
+  )
+
+  useEffect(() => {
+    if (!bounty) return
+    setGithubUrl(initialMilestone?.submitted_github_url || "")
+    setSubmissionNotes(initialMilestone?.submission_notes || "")
+    setAuditResult(null)
+  }, [bounty?.id, initialMilestone?.id])
+
+  useEffect(() => {
+    if (isSybilDetected && fraudRef.current) {
+      animateAlertPulse(fraudRef.current)
+    }
+  }, [isSybilDetected])
 
   if (!bounty) {
     return (
@@ -2526,13 +2653,13 @@ function AuditHub({
     has_certificate: false,
   }
 
-  const isSybilDetected = auditResult?.sybil_detected || activeBounty.status === "fraud_review_pending"
-
-  useEffect(() => {
-    if (isSybilDetected && fraudRef.current) {
-      animateAlertPulse(fraudRef.current)
-    }
-  }, [isSybilDetected])
+  const persistedAudit = auditResult?.audit_result || auditResult || activeMilestone.audit_result || null
+  const hasSubmittedDeliverable = Boolean(
+    activeMilestone.submitted_github_url ||
+      activeMilestone.submission_notes ||
+      persistedAudit?.telemetry?.github_url ||
+      persistedAudit?.telemetry?.submission_notes
+  )
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -2543,10 +2670,23 @@ function AuditHub({
   const handleSubmitAudit = async () => {
     try {
       setSubmitting(true)
-      const res = await submitWork(activeBounty.id, activeMilestone.id, {
-        github_url: tab === "github" ? githubUrl : undefined,
-        file: tab === "receipt" ? selectedFile || undefined : undefined,
-      })
+      let res: any
+      if (tab === "github" || !selectedFile) {
+        if (!githubUrl.trim() && !submissionNotes.trim()) {
+          alert("Please enter a GitHub repository URL or submission notes.")
+          return
+        }
+        res = await auditMilestone(activeMilestone.id, {
+          github_url: githubUrl.trim() || undefined,
+          submission_notes: submissionNotes.trim() || undefined,
+        })
+      } else {
+        res = await submitWork(activeBounty.id, activeMilestone.id, {
+          github_url: githubUrl.trim() || undefined,
+          submission_notes: submissionNotes.trim() || undefined,
+          file: selectedFile || undefined,
+        })
+      }
       setAuditResult(res)
       onRefresh()
     } catch (err: any) {
@@ -2587,7 +2727,7 @@ function AuditHub({
               <small>Remaining balance</small>${(activeBounty.remaining_amount_usd || activeBounty.amount_usd || 0).toLocaleString()} USD
             </span>
             <Badge tone={activeBounty.risk_score === "HIGH" ? "red" : "green"}>
-              {activeBounty.risk_score || "LOW"} RISK &bull; {activeBounty.risk_percentage || 12}%
+              {activeBounty.risk_score || "LOW"} RISK &bull; {activeBounty.risk_percentage ?? 15}%
             </Badge>
           </div>
         </div>
@@ -2597,13 +2737,13 @@ function AuditHub({
         <div>
           <div className="section-number">SUBMISSION EVIDENCE</div>
           <div className="tabs">
-            <button className={tab === "receipt" ? "active" : ""} onClick={() => setTab("receipt")}>
-              <Icon name="receipt" />
-              Receipt Upload (Images &amp; PDFs)
-            </button>
             <button className={tab === "github" ? "active" : ""} onClick={() => setTab("github")}>
               <Icon name="code" />
               GitHub Repository URL
+            </button>
+            <button className={tab === "receipt" ? "active" : ""} onClick={() => setTab("receipt")}>
+              <Icon name="receipt" />
+              Receipt Upload (Images &amp; PDFs)
             </button>
           </div>
 
@@ -2626,13 +2766,22 @@ function AuditHub({
             </div>
           ) : (
             <div className="github-field">
-              <label>Repository URL</label>
+              <label>Repository or PR URL</label>
               <div>
                 <Icon name="code" />
                 <input value={githubUrl} onChange={(e) => setGithubUrl(e.target.value)} placeholder="https://github.com/org/repo" />
-                <Badge tone="green">ACCESS VERIFIED</Badge>
+                <Badge tone="green">GITHUB REST API</Badge>
               </div>
-              <p>Anti-Sybil stylometric fingerprinting screen checks AST node hash and naming style before grading.</p>
+              <label style={{ marginTop: "12px", display: "block" }}>Submission Notes</label>
+              <textarea
+                rows={3}
+                className="negotiation-textarea"
+                style={{ marginTop: "6px" }}
+                placeholder="Summarize implementation changes, endpoints, or test instructions..."
+                value={submissionNotes}
+                onChange={(e) => setSubmissionNotes(e.target.value)}
+              />
+              <p>Fetches live repository/PR telemetry via GitHub REST API and evaluates criteria with Gemini.</p>
             </div>
           )}
 
@@ -2661,38 +2810,119 @@ function AuditHub({
               <div className="section-number">AI AUDITOR VERDICT</div>
               <h2>Evidence analysis</h2>
             </div>
-            <span className={`verdict-stamp ${auditResult?.passed ? "" : "pending"}`}>
-              <Icon name="check" size={20} />
-              {auditResult?.passed ? "PASSED" : auditResult?.status || "READY TO AUDIT"}
+            <span className={`verdict-stamp ${persistedAudit?.passed ? "" : "pending"}`}>
+              <Icon name={persistedAudit?.passed ? "check" : "shield"} size={20} />
+              {persistedAudit ? (persistedAudit.passed ? "PASSED" : "REJECTED") : "PENDING DELIVERABLE"}
             </span>
           </div>
 
-          <div className="score-ring">
-            <div>
-              <strong>{auditResult?.passed ? "96" : auditResult ? "42" : "94"}</strong>
-              <span>/ 100</span>
+          {!persistedAudit && !hasSubmittedDeliverable ? (
+            <div
+              style={{
+                border: "1px dashed #3f3f46",
+                borderRadius: "10px",
+                padding: "20px",
+                margin: "12px 0 18px",
+                background: "rgba(24, 24, 27, 0.55)",
+              }}
+            >
+              <strong style={{ display: "block", fontSize: "13px", color: "#fafafa", marginBottom: "6px" }}>
+                Pending Deliverable — No submission uploaded yet
+              </strong>
+              <p style={{ fontSize: "12px", color: "#a1a1aa", lineHeight: "1.6", margin: 0 }}>
+                Submit a GitHub repository/PR URL, submission notes, or proof receipt on the left to execute a real Gemini AI audit and persist the dossier to PostgreSQL.
+              </p>
             </div>
-            <p>Audit confidence</p>
-          </div>
+          ) : !persistedAudit ? (
+            <div
+              style={{
+                border: "1px solid rgba(245, 158, 11, 0.35)",
+                borderRadius: "10px",
+                padding: "16px",
+                margin: "12px 0 18px",
+                background: "rgba(245, 158, 11, 0.06)",
+              }}
+            >
+              <strong style={{ display: "block", fontSize: "13px", color: "#fbbf24", marginBottom: "6px" }}>
+                Deliverable Uploaded — Awaiting Gemini Audit
+              </strong>
+              {activeMilestone.submitted_github_url && (
+                <p style={{ fontSize: "12px", color: "#e4e4e7", margin: "4px 0" }}>
+                  GitHub URL: <code>{activeMilestone.submitted_github_url}</code>
+                </p>
+              )}
+              {activeMilestone.submission_notes && (
+                <p style={{ fontSize: "12px", color: "#a1a1aa", margin: "4px 0" }}>
+                  Notes: {activeMilestone.submission_notes}
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="score-ring">
+                <div>
+                  <strong>{persistedAudit.score ?? (persistedAudit.passed ? 100 : 0)}</strong>
+                  <span>/ 100</span>
+                </div>
+                <p>Audit score</p>
+              </div>
 
-          <div className="extracted">
-            <h3>Audit reasoning &amp; evidence</h3>
-            <p style={{ fontSize: "11px", color: "#bbb", lineHeight: "1.6", margin: "0 0 12px" }}>
-              {auditResult?.feedback ||
-                "Autonomous multimodal analysis verified deliverables against milestone acceptance criteria. PayPal Payout authorized upon compliance clearance."}
-            </p>
-            {activeMilestone.has_certificate && (
-              <a
-                className="cert-btn"
-                style={{ height: "36px", padding: "0 14px", fontSize: "11px", marginBottom: "16px" }}
-                href={`${API_BASE}/api/milestones/${activeMilestone.id}/certificate`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Icon name="file" size={14} /> Download Official Escrow Certificate (PDF)
-              </a>
-            )}
-          </div>
+              <div className="extracted">
+                <h3>Audit reasoning &amp; evidence</h3>
+                <p style={{ fontSize: "12px", color: "#d4d4d8", lineHeight: "1.6", margin: "0 0 12px" }}>
+                  {persistedAudit.summary || persistedAudit.feedback}
+                </p>
+
+                {Array.isArray(persistedAudit.criteria_results) && persistedAudit.criteria_results.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" }}>
+                    {persistedAudit.criteria_results.map((c: any, i: number) => (
+                      <div
+                        key={i}
+                        style={{
+                          border: "1px solid #27272a",
+                          borderRadius: "8px",
+                          padding: "8px 10px",
+                          background: "#09090b",
+                          fontSize: "11px",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", fontWeight: 600 }}>
+                          <span style={{ color: "#f4f4f5" }}>{c.criterion}</span>
+                          <span style={{ color: c.passed ? "#4ade80" : "#f87171" }}>
+                            {c.metric || (c.passed ? "VERIFIED" : "FAILED")}
+                          </span>
+                        </div>
+                        {c.evidence && (
+                          <div style={{ color: "#a1a1aa", marginTop: "4px" }}>{c.evidence}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(activeMilestone.submitted_github_url || persistedAudit.telemetry?.github_url) && (
+                  <div style={{ fontSize: "11px", color: "#a1a1aa", marginBottom: "12px" }}>
+                    Source: <code>{activeMilestone.submitted_github_url || persistedAudit.telemetry?.github_url}</code>
+                    {persistedAudit.telemetry?.commit_sha
+                      ? ` • Commit ${String(persistedAudit.telemetry.commit_sha).slice(0, 7)}`
+                      : ""}
+                  </div>
+                )}
+
+                {activeMilestone.has_certificate && (
+                  <a
+                    className="cert-btn"
+                    style={{ height: "36px", padding: "0 14px", fontSize: "11px", marginBottom: "16px" }}
+                    href={`${API_BASE}/api/milestones/${activeMilestone.id}/certificate`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <Icon name="file" size={14} /> Download Official Escrow Certificate (PDF)
+                  </a>
+                )}
+              </div>
+            </>
+          )}
 
           <div className="appeal">
             <label htmlFor="appeal">Submit Appeal / Mediator AI</label>
@@ -2894,10 +3124,25 @@ function Admin({
                         <small>USD &bull; High Value</small>
                       </td>
                       <td>
-                        <div className="admin-audit-pill passed">
-                          <span className="amber-dot" />
-                          <span>AI AUDIT: PASSED (98.4%)</span>
-                        </div>
+                        {(() => {
+                          const realAudit = contract.milestones?.[0]?.audit_result
+                          if (!realAudit) {
+                            return (
+                              <div className="admin-audit-pill">
+                                <span className="amber-dot" />
+                                <span>PENDING DELIVERABLE</span>
+                              </div>
+                            )
+                          }
+                          return (
+                            <div className={`admin-audit-pill ${realAudit.passed ? "passed" : ""}`}>
+                              <span className="amber-dot" />
+                              <span>
+                                AI AUDIT: {realAudit.passed ? "PASSED" : "REJECTED"} ({realAudit.score}/100)
+                              </span>
+                            </div>
+                          )
+                        })()}
                       </td>
                       <td style={{ textAlign: "right" }}>
                         <button
@@ -2980,7 +3225,10 @@ function Admin({
                 <div className="admin-detail-row">
                   <span className="detail-key">AI Audit Verdict</span>
                   <span className="detail-val audit-pass-text">
-                    <span className="amber-dot" /> Verified &bull; 98.4% Confidence
+                    <span className="amber-dot" />{" "}
+                    {selectedContract.milestones?.[0]?.audit_result
+                      ? `${selectedContract.milestones[0].audit_result.passed ? "Verified" : "Flagged"} • ${selectedContract.milestones[0].audit_result.score}/100`
+                      : "Pending Deliverable — No submission uploaded yet"}
                   </span>
                 </div>
                 <div className="admin-detail-row">

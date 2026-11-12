@@ -144,6 +144,12 @@ class Milestone(Base):
     certificate_id = Column(String, nullable=True, index=True)
     certificate_pdf_path = Column(String, nullable=True)
 
+    # Real Milestone Submission & Persisted AI Audit Dossier
+    submitted_github_url = Column(String, nullable=True)
+    submission_notes = Column(Text, nullable=True)
+    audit_result = Column(JSONB, nullable=True)
+    audited_at = Column(DateTime, nullable=True)
+
     bounty = relationship("Bounty", back_populates="milestones")
     audit_logs = relationship("AuditLog", back_populates="milestone")
 

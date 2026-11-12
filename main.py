@@ -38,6 +38,7 @@ from qa_agent import (
     mediate_dispute,
     generate_conversational_escrow,
     negotiate_scope_compromise,
+    audit_milestone_deliverable,
 )
 from certificate_generator import generate_escrow_certificate_pdf
 from stylometric_fingerprint import evaluate_sybil_stylometric_fingerprint
@@ -125,6 +126,10 @@ try:
         conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS shipping_status VARCHAR DEFAULT 'NOT_SHIPPED';"))
         conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS certificate_id VARCHAR;"))
         conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS certificate_pdf_path VARCHAR;"))
+        conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS submitted_github_url VARCHAR;"))
+        conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS submission_notes TEXT;"))
+        conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS audit_result JSONB;"))
+        conn.execute(text("ALTER TABLE milestones ADD COLUMN IF NOT EXISTS audited_at TIMESTAMP;"))
         conn.execute(text("ALTER TABLE escrows ADD COLUMN IF NOT EXISTS paypal_order_ids JSON DEFAULT '[]'::json;"))
         conn.execute(text("ALTER TABLE escrows ADD COLUMN IF NOT EXISTS paypal_authorization_ids JSON DEFAULT '[]'::json;"))
         conn.execute(text("ALTER TABLE escrows ADD COLUMN IF NOT EXISTS paypal_capture_ids JSON DEFAULT '[]'::json;"))
@@ -627,6 +632,35 @@ def health_check(db: Session = Depends(get_db)):
     return {"status": "ok", "db_connected": True}
 
 
+def _serialize_milestone(m: models.Milestone, b: models.Bounty) -> dict:
+    return {
+        "id": m.id,
+        "description": m.description,
+        "deadline": m.deadline,
+        "percentage": m.percentage,
+        "amount_usd": m.amount_usd,
+        "status": m.status,
+        "criteria_strings": getattr(m, "criteria_strings", None) or getattr(m, "dynamic_criteria", None) or [],
+        "paypal_authorization_ids": getattr(m, "paypal_authorization_ids", None) or getattr(m, "authorization_ids", None) or [],
+        "authorization_ids": m.authorization_ids or [],
+        "requires_human_approval": bool(m.requires_human_approval or b.requires_human_approval or (m.amount_usd or 0) > HIGH_VALUE_THRESHOLD),
+        "tracking_number": m.tracking_number or b.tracking_number,
+        "shipping_status": m.shipping_status or b.shipping_status or "NOT_SHIPPED",
+        "paypal_payout_batch_id": m.paypal_payout_batch_id,
+        "certificate_id": m.certificate_id,
+        "certificate_pdf_path": m.certificate_pdf_path,
+        "has_certificate": bool(m.certificate_pdf_path and os.path.exists(m.certificate_pdf_path)),
+        "submitted_github_url": getattr(m, "submitted_github_url", None),
+        "submission_notes": getattr(m, "submission_notes", None),
+        "audit_result": getattr(m, "audit_result", None),
+        "audited_at": (
+            m.audited_at.isoformat()
+            if getattr(m, "audited_at", None) and hasattr(m.audited_at, "isoformat")
+            else getattr(m, "audited_at", None)
+        ),
+    }
+
+
 @app.get("/api/bounties")
 def list_bounties(
     me_id: str | None = None,
@@ -698,27 +732,7 @@ def list_bounties(
             "risk_updated_at": b.risk_updated_at,
             "requires_human_approval": bool(b.requires_human_approval or (b.amount_usd or 0) > HIGH_VALUE_THRESHOLD),
             "is_high_value": (b.amount_usd or 0) > HIGH_VALUE_THRESHOLD,
-            "milestones": [
-                {
-                    "id": m.id,
-                    "description": m.description,
-                    "deadline": m.deadline,
-                    "percentage": m.percentage,
-                    "amount_usd": m.amount_usd,
-                    "status": m.status,
-                    "criteria_strings": getattr(m, "criteria_strings", None) or getattr(m, "dynamic_criteria", None) or [],
-                    "paypal_authorization_ids": getattr(m, "paypal_authorization_ids", None) or getattr(m, "authorization_ids", None) or [],
-                    "authorization_ids": m.authorization_ids or [],
-                    "requires_human_approval": bool(m.requires_human_approval or b.requires_human_approval or (m.amount_usd or 0) > HIGH_VALUE_THRESHOLD),
-                    "tracking_number": m.tracking_number or b.tracking_number,
-                    "shipping_status": m.shipping_status or b.shipping_status or "NOT_SHIPPED",
-                    "paypal_payout_batch_id": m.paypal_payout_batch_id,
-                    "certificate_id": m.certificate_id,
-                    "certificate_pdf_path": m.certificate_pdf_path,
-                    "has_certificate": bool(m.certificate_pdf_path and os.path.exists(m.certificate_pdf_path)),
-                }
-                for m in (b.milestones or [])
-            ],
+            "milestones": [_serialize_milestone(m, b) for m in (b.milestones or [])],
         }
         for b in bounties
     ]
@@ -771,27 +785,7 @@ def get_bounty(bounty_id: int, db: Session = Depends(get_db)):
             "stripe_transfer_id": bounty.escrow.stripe_transfer_id if bounty.escrow else None,
             "currency": bounty.escrow.currency if bounty.escrow else "USD",
         } if bounty.escrow else None,
-        "milestones": [
-            {
-                "id": m.id,
-                "description": m.description,
-                "deadline": m.deadline,
-                "percentage": m.percentage,
-                "amount_usd": m.amount_usd,
-                "status": m.status,
-                "criteria_strings": getattr(m, "criteria_strings", None) or getattr(m, "dynamic_criteria", None) or [],
-                "paypal_authorization_ids": getattr(m, "paypal_authorization_ids", None) or getattr(m, "authorization_ids", None) or [],
-                "authorization_ids": m.authorization_ids or [],
-                "requires_human_approval": bool(m.requires_human_approval or bounty.requires_human_approval or (m.amount_usd or 0) > HIGH_VALUE_THRESHOLD),
-                "tracking_number": m.tracking_number or bounty.tracking_number,
-                "shipping_status": m.shipping_status or bounty.shipping_status or "NOT_SHIPPED",
-                "paypal_payout_batch_id": m.paypal_payout_batch_id,
-                "certificate_id": m.certificate_id,
-                "certificate_pdf_path": m.certificate_pdf_path,
-                "has_certificate": bool(m.certificate_pdf_path and os.path.exists(m.certificate_pdf_path)),
-            }
-            for m in (bounty.milestones or [])
-        ],
+        "milestones": [_serialize_milestone(m, bounty) for m in (bounty.milestones or [])],
     }
 
 
@@ -2180,6 +2174,7 @@ async def submit_work(
     # Parse incoming payload (supports multipart/form-data and application/json)
     content_type = request.headers.get("content-type", "").lower()
     github_url: str | None = None
+    submission_notes: str | None = None
     installation_id: int | str | None = None
     target_milestone_id = milestone_id
     uploaded_files_data: list[tuple[bytes, str, str]] = []
@@ -2189,6 +2184,9 @@ async def submit_work(
         github_url = form.get("github_url")
         if isinstance(github_url, str):
             github_url = github_url.strip() or None
+        raw_notes = form.get("submission_notes") or form.get("notes")
+        if isinstance(raw_notes, str):
+            submission_notes = raw_notes.strip() or None
 
         form_inst = form.get("installation_id")
         if form_inst:
@@ -2214,6 +2212,11 @@ async def submit_work(
     elif "application/json" in content_type:
         body = await request.json()
         github_url = body.get("github_url")
+        if isinstance(github_url, str):
+            github_url = github_url.strip() or None
+        raw_notes = body.get("submission_notes") or body.get("notes")
+        if isinstance(raw_notes, str):
+            submission_notes = raw_notes.strip() or None
         body_inst = body.get("installation_id")
         if body_inst:
             installation_id = str(body_inst).strip()
@@ -2348,7 +2351,11 @@ async def submit_work(
             "message": "AST linting & stylometric verification passed. Connecting Gemini 1.5 Pro reasoning stream...",
         })
 
-    # Update state to AUDITING
+    # Persist worker submission metadata & update state to AUDITING
+    if github_url:
+        milestone.submitted_github_url = github_url
+    if submission_notes:
+        milestone.submission_notes = submission_notes
     milestone.status = "AUDITING"
     bounty.status = "AUDITING"
     db.commit()
@@ -2363,23 +2370,54 @@ async def submit_work(
             "text": chunk_text,
         })
 
-    # Run AI QA Evaluation (multimodal receipt extraction with Pillow EXIF OR code QA) with stream=True
-    eval_result = await evaluate_submission(
-        github_url=github_url,
-        files=uploaded_files_data if len(uploaded_files_data) > 0 else None,
-        acceptance_criteria=bounty.acceptance_criteria,
-        bounty_id=bounty_id,
-        milestone_id=milestone.id,
-        milestone_description=milestone.description,
-        milestone_deadline=milestone.deadline,
-        installation_id=installation_id,
-        stream=True,
-        on_chunk=on_reasoning_chunk,
-    )
+    # Run AI QA Evaluation (multimodal receipt extraction with Pillow EXIF OR real GitHub + Gemini audit)
+    if github_url and len(uploaded_files_data) == 0:
+        eval_result = await audit_milestone_deliverable(
+            bounty_title=bounty.title or f"Contract #{bounty.id}",
+            acceptance_criteria=bounty.acceptance_criteria or "",
+            milestone_id=milestone.id,
+            milestone_description=milestone.description or "",
+            milestone_deadline=milestone.deadline,
+            criteria_strings=getattr(milestone, "criteria_strings", None) or [],
+            github_url=github_url,
+            submission_notes=submission_notes,
+            stream=True,
+            on_chunk=on_reasoning_chunk,
+        )
+    else:
+        eval_result = await evaluate_submission(
+            github_url=github_url,
+            files=uploaded_files_data if len(uploaded_files_data) > 0 else None,
+            proof_text=submission_notes,
+            acceptance_criteria=bounty.acceptance_criteria,
+            bounty_id=bounty_id,
+            milestone_id=milestone.id,
+            milestone_description=milestone.description,
+            milestone_deadline=milestone.deadline,
+            installation_id=installation_id,
+            stream=True,
+            on_chunk=on_reasoning_chunk,
+        )
 
     passed = eval_result.get("passed", False)
-    feedback = eval_result.get("feedback", "")
-    extracted_data = eval_result.get("extracted_data")
+    feedback = eval_result.get("summary") or eval_result.get("feedback", "")
+    extracted_data = eval_result.get("extracted_data") or eval_result.get("telemetry")
+
+    # Persist real structured audit result JSON to Milestone record in PostgreSQL
+    now_audit_ts = datetime.utcnow()
+    milestone.audit_result = {
+        "passed": bool(passed),
+        "score": eval_result.get("score", 100 if passed else 0),
+        "summary": feedback,
+        "criteria_results": eval_result.get("criteria_results") or [],
+        "telemetry": eval_result.get("telemetry") or {
+            "github_url": milestone.submitted_github_url,
+            "submission_notes": milestone.submission_notes,
+            "extracted_data": extracted_data,
+        },
+        "audited_at": now_audit_ts.isoformat(),
+    }
+    milestone.audited_at = now_audit_ts
 
     # Save to AuditLog
     audit_log = models.AuditLog(
@@ -2564,6 +2602,10 @@ async def submit_work(
         "remaining_amount_usd": bounty.remaining_amount_usd,
         "feedback": feedback,
         "passed": passed,
+        "score": milestone.audit_result.get("score") if milestone.audit_result else None,
+        "audit_result": milestone.audit_result,
+        "submitted_github_url": milestone.submitted_github_url,
+        "submission_notes": milestone.submission_notes,
         "extracted_data": extracted_data,
         "escrow_provider": bounty.escrow_provider.value if hasattr(bounty.escrow_provider, "value") else str(bounty.escrow_provider),
         "stripe_transfer_id": milestone.stripe_transfer_id,
@@ -4387,6 +4429,182 @@ async def release_milestone_funds(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to execute PayPal Payout: {str(exc)}",
         )
+
+
+@app.post("/api/milestones/{milestone_id}/audit", status_code=status.HTTP_200_OK)
+@app.post("/api/milestones/{milestone_id}/submit", status_code=status.HTTP_200_OK)
+async def audit_or_submit_milestone(
+    milestone_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Real AI Deliverable Submission & Gemini Audit endpoint:
+    Accepts `github_url` and `submission_notes` (or `notes`), fetches real public GitHub
+    repository/PR metadata & code via GitHub REST API, prompts Gemini against the actual
+    milestone & contract requirements, persists structured JSON (`audit_result`) to PostgreSQL,
+    and returns `{ passed, score, criteria_results, summary, telemetry }`.
+    """
+    milestone = db.query(models.Milestone).filter(models.Milestone.id == milestone_id).first()
+    if not milestone:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Milestone #{milestone_id} not found.",
+        )
+
+    bounty = milestone.bounty
+    if not bounty:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Parent contract for Milestone #{milestone_id} not found.",
+        )
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    github_url: str | None = None
+    submission_notes: str | None = None
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        raw_url = form.get("github_url")
+        raw_notes = form.get("submission_notes") or form.get("notes")
+        github_url = raw_url.strip() if isinstance(raw_url, str) and raw_url.strip() else None
+        submission_notes = raw_notes.strip() if isinstance(raw_notes, str) and raw_notes.strip() else None
+    else:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            raw_url = payload.get("github_url")
+            raw_notes = payload.get("submission_notes") or payload.get("notes")
+            github_url = str(raw_url).strip() if raw_url and str(raw_url).strip() else None
+            submission_notes = str(raw_notes).strip() if raw_notes and str(raw_notes).strip() else None
+
+    effective_url = github_url if github_url is not None else milestone.submitted_github_url
+    effective_notes = submission_notes if submission_notes is not None else milestone.submission_notes
+
+    if not effective_url and not effective_notes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Deliverable submission requires a github_url or submission_notes.",
+        )
+
+    milestone.submitted_github_url = effective_url
+    milestone.submission_notes = effective_notes
+    milestone.status = "AUDITING"
+    db.add(milestone)
+    db.commit()
+
+    await audit_connection_manager.send_json(milestone.id, {
+        "type": "ast_linting_progress",
+        "stage": "github_fetch",
+        "milestone_id": milestone.id,
+        "progress": 30,
+        "message": (
+            f"Fetching live GitHub evidence from {effective_url}..."
+            if effective_url
+            else f"Analyzing submission notes for Milestone #{milestone.id}..."
+        ),
+    })
+
+    async def on_reasoning_chunk(chunk_text: str):
+        await audit_connection_manager.send_json(milestone.id, {
+            "type": "reasoning_chunk",
+            "stage": "gemini_reasoning",
+            "milestone_id": milestone.id,
+            "chunk": chunk_text,
+            "text": chunk_text,
+        })
+
+    try:
+        audit_payload = await audit_milestone_deliverable(
+            bounty_title=bounty.title or f"Contract #{bounty.id}",
+            acceptance_criteria=bounty.acceptance_criteria or "",
+            milestone_id=milestone.id,
+            milestone_description=milestone.description or "",
+            milestone_deadline=milestone.deadline,
+            criteria_strings=getattr(milestone, "criteria_strings", None) or [],
+            github_url=effective_url,
+            submission_notes=effective_notes,
+            stream=True,
+            on_chunk=on_reasoning_chunk,
+        )
+    except ValueError as cfg_err:
+        milestone.status = "LOCKED"
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cfg_err))
+    except Exception as exc:
+        milestone.status = "LOCKED"
+        db.commit()
+        logger.error("[Milestone Audit] Failed for Milestone #%d: %s", milestone.id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI audit execution failed: {str(exc)}",
+        )
+
+    now_ts = datetime.utcnow()
+    persisted_result = {
+        "passed": bool(audit_payload["passed"]),
+        "score": int(audit_payload["score"]),
+        "summary": audit_payload["summary"],
+        "criteria_results": audit_payload["criteria_results"],
+        "telemetry": audit_payload["telemetry"],
+        "audited_at": now_ts.isoformat(),
+    }
+
+    is_high_value = bool(
+        bounty.requires_human_approval
+        or milestone.requires_human_approval
+        or (bounty.amount_usd and bounty.amount_usd > HIGH_VALUE_THRESHOLD)
+        or (milestone.amount_usd and milestone.amount_usd > HIGH_VALUE_THRESHOLD)
+    )
+
+    milestone.audit_result = persisted_result
+    milestone.audited_at = now_ts
+    if persisted_result["passed"]:
+        milestone.status = "PENDING_ADMIN" if is_high_value else "PASSED"
+    else:
+        milestone.status = "REJECTED"
+
+    audit_log = models.AuditLog(
+        bounty_id=bounty.id,
+        milestone_id=milestone.id,
+        trajectory_id=f"gemini_audit_m_{milestone.id}_{int(now_ts.timestamp())}",
+        passed=persisted_result["passed"],
+        ai_feedback=persisted_result["summary"],
+    )
+    db.add(milestone)
+    db.add(audit_log)
+    db.commit()
+    db.refresh(milestone)
+
+    await audit_connection_manager.send_json(milestone.id, {
+        "type": "audit_verdict",
+        "stage": "verdict",
+        "milestone_id": milestone.id,
+        "passed": persisted_result["passed"],
+        "score": persisted_result["score"],
+        "verdict": "PASSED" if persisted_result["passed"] else "REJECTED",
+        "feedback": persisted_result["summary"],
+        "audit_result": persisted_result,
+        "milestone_status": milestone.status,
+    })
+
+    return {
+        "status": "success",
+        "milestone_id": milestone.id,
+        "milestone_status": milestone.status,
+        "submitted_github_url": milestone.submitted_github_url,
+        "submission_notes": milestone.submission_notes,
+        "passed": persisted_result["passed"],
+        "score": persisted_result["score"],
+        "summary": persisted_result["summary"],
+        "feedback": persisted_result["summary"],
+        "criteria_results": persisted_result["criteria_results"],
+        "telemetry": persisted_result["telemetry"],
+        "audit_result": persisted_result,
+        "audited_at": now_ts.isoformat(),
+    }
 
 
 
