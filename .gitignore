@@ -43,6 +43,13 @@ certificates/*.pdf
 # Documentation reports and generation scripts
 *.docx
 generate_system_architecture_report.py
+build_full_project_documentation_doc.py
+
+# Generated QA / Playwright artifacts
+QA_Report.md
+QA_Report.html
+playwright-report/
+test-results/
 
 # OS generated files
 .DS_Store

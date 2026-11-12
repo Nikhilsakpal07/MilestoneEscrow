@@ -1,5 +1,26 @@
 export const API_BASE = "http://localhost:8000"
 
+/**
+ * Safe fetch with AbortController timeout to prevent UI hanging indefinitely.
+ */
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 2500
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+    return res
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 export interface MilestoneData {
   id: number
   description: string
@@ -24,6 +45,10 @@ export interface BountyData {
   remaining_amount_usd: number
   freelancer_email: string
   freelancer_phone?: string
+  worker_me_id?: string
+  sponsor_me_id?: string
+  sponsor_email?: string
+  created_by_user_id?: string
   tracking_number?: string
   shipping_status?: string
   status: string
@@ -36,11 +61,17 @@ export interface BountyData {
 }
 
 /**
- * Fetch all bounties from backend API
+ * Fetch bounties from backend API.
+ * Optionally filter by ME-ID, Email, or Role (sponsor/worker).
  */
-export async function getBounties(): Promise<BountyData[]> {
+export async function getBounties(meId?: string, email?: string, role?: string): Promise<BountyData[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/bounties`, { method: "GET" })
+    const params = new URLSearchParams()
+    if (meId) params.append("me_id", meId)
+    if (email) params.append("email", email)
+    if (role) params.append("role", role)
+    const qs = params.toString() ? `?${params.toString()}` : ""
+    const res = await fetchWithTimeout(`${API_BASE}/api/bounties${qs}`, { method: "GET" }, 2500)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     if (Array.isArray(data)) {
@@ -203,4 +234,64 @@ export async function pollOracleDeliveries() {
   const res = await fetch(`${API_BASE}/api/oracle/poll`, { method: "POST" })
   return res.json()
 }
+
+/**
+ * Register a user with Firebase UID and Email.
+ * Generates an Ethereum wallet address, stores keys, and returns the derived blockchain ME-ID.
+ */
+export async function registerAuthUser(firebaseUid: string, email: string, name?: string) {
+  const res = await fetchWithTimeout(`${API_BASE}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      firebase_uid: firebaseUid,
+      email,
+      name,
+    }),
+  }, 2500)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "User registration failed.")
+  }
+  return res.json()
+}
+
+/**
+ * Fetch the authenticated user's PostgreSQL record (including ME-ID & Ethereum wallet) using their Firebase JWT.
+ */
+export async function getAuthMe(token?: string) {
+  const headers: Record<string, string> = {}
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`
+  }
+  const res = await fetchWithTimeout(`${API_BASE}/api/auth/me`, {
+    method: "GET",
+    headers,
+  }, 2500)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || "Failed to fetch user profile from PostgreSQL.")
+  }
+  return res.json()
+}
+
+/**
+ * Verify a Worker ME-ID against the PostgreSQL registry.
+ */
+export async function verifyWorkerMeId(meId: string) {
+  const res = await fetchWithTimeout(
+    `${API_BASE}/api/users/verify-me-id/${encodeURIComponent(meId.trim())}`,
+    {
+      method: "GET",
+    },
+    2500
+  )
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Worker ME-ID '${meId}' is not registered in PostgreSQL.`)
+  }
+  return res.json()
+}
+
+
 

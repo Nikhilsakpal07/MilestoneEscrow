@@ -2005,3 +2005,902 @@ footer { height: 58px; border-top: 1px solid #1b1b1b; color: #464646; font-size:
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* =========================================================================
+   SPONSOR PORTFOLIO SURVEILLANCE & DASHBOARD
+   Hyper-minimalist B2B SaaS dark mode (#000000 background, stark white text,
+   flat neon-green accents, zero gradients)
+   ========================================================================= */
+
+/* Solid Flat Neon-Green Button: "+ Create New Contract" */
+.sponsor-create-btn {
+  height: 42px;
+  padding: 0 20px;
+  background: var(--green, #00ff88);
+  color: #000000;
+  border: 1px solid var(--green, #00ff88);
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+
+.sponsor-create-btn:hover {
+  background: #1aff94;
+  border-color: #1aff94;
+}
+
+.sponsor-create-btn:active {
+  transform: translateY(1px);
+}
+
+/* Pulsing Crimson/Red Accent for High-Risk Deliveries Metric */
+.pulse-crimson-value {
+  color: #ff2a55 !important;
+  animation: pulse-crimson 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse-crimson {
+  0%, 100% {
+    color: #ff2a55;
+    text-shadow: 0 0 0 rgba(255, 42, 85, 0);
+    opacity: 1;
+  }
+  50% {
+    color: #ff5e7f;
+    text-shadow: 0 0 18px rgba(255, 42, 85, 0.65);
+    opacity: 0.88;
+  }
+}
+
+/* Table Specific Cell Layouts */
+.table-title-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.contract-title-text {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  display: block;
+  letter-spacing: -0.01em;
+}
+
+.contract-meta-sub {
+  color: #71717a;
+  font-size: 11px;
+  display: block;
+  font-family: var(--font-mono, monospace);
+}
+
+.worker-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.worker-me-badge-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.worker-me-badge {
+  display: inline-block;
+  background: #0c0c0e;
+  border: 1px solid #27272a;
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  width: fit-content;
+}
+
+.worker-email-sub {
+  color: #71717a;
+  font-size: 11px;
+}
+
+.balance-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.balance-amount {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}
+
+.balance-sub {
+  color: #71717a;
+  font-size: 10px;
+}
+
+/* Status Badges: LOCKED, AUDITING, COMPLETED */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.status-badge.status-completed {
+  border: 1px solid rgba(0, 255, 136, 0.45);
+  background: rgba(0, 255, 136, 0.08);
+  color: #00ff88;
+}
+
+.status-badge.status-auditing {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+
+.status-badge.status-locked {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e4e4e7;
+}
+
+/* Predictive Risk Score Pills: Emerald, Amber, Crimson */
+.risk-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.risk-pill.risk-pill-emerald {
+  border: 1px solid rgba(0, 255, 136, 0.45);
+  background: rgba(0, 255, 136, 0.08);
+  color: #00ff88;
+}
+
+.risk-pill.risk-pill-amber {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+  color: #f59e0b;
+}
+
+.risk-pill.risk-pill-crimson {
+  border: 1px solid rgba(255, 42, 85, 0.5);
+  background: rgba(255, 42, 85, 0.12);
+  color: #ff2a55;
+}
+
+.risk-pill-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.risk-pill-dot.dot-emerald {
+  background: #00ff88;
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.5);
+}
+
+.risk-pill-dot.dot-amber {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+
+.risk-pill-dot.dot-crimson {
+  background: #ff2a55;
+  box-shadow: 0 0 8px rgba(255, 42, 85, 0.7);
+}
+
+/* Row Action: Subtle Outline Button "View AI Audit" */
+.subtle-outline-audit-btn {
+  height: 32px;
+  padding: 0 14px;
+  background: transparent;
+  border: 1px solid #27272a;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.subtle-outline-audit-btn:hover {
+  border-color: var(--green, #00ff88);
+  color: var(--green, #00ff88);
+  background: rgba(0, 255, 136, 0.05);
+}
+
+.subtle-outline-audit-btn:active {
+  transform: translateY(1px);
+}
+
+/* =========================================================================
+   AI AUDIT & NEGOTIATION HUB (SPLIT-SCREEN MODAL)
+   Pitch-black background (#000000), stark white text, sharp 1px #333 borders
+   ========================================================================= */
+
+/* Backdrop Overlay */
+.audit-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Centered Wide Modal Container */
+.audit-modal-container {
+  width: 100%;
+  max-width: 1140px;
+  max-height: 90vh;
+  background: #000000;
+  border: 1px solid #333333;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 25px 80px rgba(0, 0, 0, 0.9);
+  animation: modalScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modalScaleIn {
+  from { transform: scale(0.97); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Modal Top Bar */
+.audit-modal-topbar {
+  height: 58px;
+  padding: 0 24px;
+  border-bottom: 1px solid #333333;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #050505;
+}
+
+.audit-modal-topbar-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.audit-modal-eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #888888;
+}
+
+.audit-modal-badge {
+  background: #111111;
+  border: 1px solid #333333;
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+.audit-modal-close-btn {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid #333333;
+  border-radius: 4px;
+  color: #888888;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.audit-modal-close-btn:hover {
+  border-color: #666666;
+  color: #ffffff;
+  background: #111111;
+}
+
+/* Split-Screen 2-Column Body */
+.audit-modal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  flex: 1;
+  overflow: hidden;
+  background: #000000;
+}
+
+/* Left Column: AI Auditor Verdict */
+.audit-column-left {
+  padding: 28px 30px;
+  border-right: 1px solid #333333;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  background: #000000;
+}
+
+/* Right Column: AI Mediator & Negotiation */
+.audit-column-right {
+  padding: 28px 30px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  background: #000000;
+}
+
+/* Headers in Columns */
+.column-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.column-header-row h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 4px 0 0;
+  letter-spacing: -0.02em;
+}
+
+.column-header-row p {
+  color: #71717a;
+  font-size: 11px;
+  margin: 4px 0 0;
+}
+
+/* Large Status Badge */
+.large-verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: var(--font-mono, monospace);
+  width: fit-content;
+}
+
+.large-verdict-badge.badge-rejected {
+  border: 1px solid #ff2a55;
+  background: rgba(255, 42, 85, 0.12);
+  color: #ff2a55;
+  box-shadow: 0 0 20px rgba(255, 42, 85, 0.15);
+}
+
+.large-verdict-badge.badge-passed {
+  border: 1px solid #00ff88;
+  background: rgba(0, 255, 136, 0.1);
+  color: #00ff88;
+  box-shadow: 0 0 20px rgba(0, 255, 136, 0.15);
+}
+
+/* Acceptance Criteria Checklist */
+.checklist-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.checklist-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: #888888;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.criteria-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.criteria-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #080808;
+  border: 1px solid #222222;
+  border-radius: 4px;
+  transition: border-color 0.15s ease;
+}
+
+.criteria-checklist-item:hover {
+  border-color: #333333;
+}
+
+.criteria-icon-box {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.criteria-icon-box.icon-pass {
+  background: rgba(0, 255, 136, 0.15);
+  border: 1px solid #00ff88;
+  color: #00ff88;
+}
+
+.criteria-icon-box.icon-fail {
+  background: rgba(255, 42, 85, 0.15);
+  border: 1px solid #ff2a55;
+  color: #ff2a55;
+}
+
+.criteria-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.criteria-name {
+  color: #f4f4f5;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.criteria-meta {
+  color: #71717a;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+}
+
+.criteria-tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-family: var(--font-mono, monospace);
+  width: fit-content;
+}
+
+.criteria-tag.tag-pass {
+  color: #00ff88;
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid rgba(0, 255, 136, 0.3);
+}
+
+.criteria-tag.tag-fail {
+  color: #ff2a55;
+  background: rgba(255, 42, 85, 0.1);
+  border: 1px solid rgba(255, 42, 85, 0.3);
+}
+
+/* Extracted Data Summary Box */
+.extracted-summary-box {
+  background: #080808;
+  border: 1px solid #333333;
+  border-radius: 4px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.extracted-box-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #222222;
+  padding-bottom: 8px;
+}
+
+.extracted-box-header span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #888888;
+}
+
+.extracted-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.extracted-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.extracted-item dt {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #555555;
+}
+
+.extracted-item dd {
+  margin: 0;
+  font-size: 11px;
+  color: #dddddd;
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+
+/* Right Column: Negotiation Textarea */
+.negotiation-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.negotiation-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a1a1aa;
+}
+
+.negotiation-textarea {
+  width: 100%;
+  height: 96px;
+  background: #050505;
+  border: 1px solid #333333;
+  border-radius: 4px;
+  color: #ffffff;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.15s ease;
+  font-family: inherit;
+}
+
+.negotiation-textarea:focus {
+  border-color: #666666;
+}
+
+.negotiation-textarea::placeholder {
+  color: #444444;
+}
+
+/* Distinct AI Proposed Compromise Card */
+.ai-compromise-card {
+  background: #080808;
+  border: 1px solid #333333;
+  border-radius: 6px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.compromise-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.compromise-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--green, #00ff88);
+}
+
+.compromise-comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.comparison-box {
+  padding: 14px;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.comparison-box.original-terms {
+  background: #040404;
+  border: 1px solid #222222;
+}
+
+.comparison-box.proposed-compromise {
+  background: rgba(0, 255, 136, 0.03);
+  border: 1px solid rgba(0, 255, 136, 0.35);
+}
+
+.comparison-box-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #1f1f1f;
+}
+
+.original-terms .comparison-box-title {
+  color: #71717a;
+}
+
+.proposed-compromise .comparison-box-title {
+  color: var(--green, #00ff88);
+}
+
+.comparison-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.comparison-row dt {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #555555;
+}
+
+.comparison-row dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.comparison-row dd.delta-change {
+  color: var(--green, #00ff88);
+}
+
+.compromise-rationale {
+  font-size: 11px;
+  color: #888888;
+  line-height: 1.5;
+  background: #040404;
+  padding: 10px 12px;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+}
+
+/* Actions at Bottom of Right Column */
+.negotiation-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 10px;
+}
+
+.modal-outline-appeal-btn {
+  flex: 1;
+  height: 42px;
+  background: transparent;
+  border: 1px solid #333333;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.modal-outline-appeal-btn:hover {
+  border-color: #666666;
+  background: #111111;
+}
+
+.modal-ratify-compromise-btn {
+  flex: 1.2;
+  height: 42px;
+  background: var(--green, #00ff88);
+  border: 1px solid var(--green, #00ff88);
+  border-radius: 4px;
+  color: #000000;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+}
+
+.modal-ratify-compromise-btn:hover {
+  background: #1aff94;
+  border-color: #1aff94;
+}
+
+.modal-ratify-compromise-btn:active {
+  transform: translateY(1px);
+}
+
+/* State Switcher Pill */
+.verdict-state-toggle {
+  display: inline-flex;
+  border: 1px solid #333333;
+  border-radius: 4px;
+  padding: 2px;
+  background: #080808;
+}
+
+.verdict-state-toggle button {
+  padding: 3px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 0;
+  background: transparent;
+  color: #666666;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: all 0.15s ease;
+}
+
+.verdict-state-toggle button.active.btn-rej {
+  background: #ff2a55;
+  color: #ffffff;
+}
+
+.verdict-state-toggle button.active.btn-pass {
+  background: #00ff88;
+  color: #000000;
+}
+
+@media (max-width: 900px) {
+  .audit-modal-grid {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .audit-column-left {
+    border-right: 0;
+    border-bottom: 1px solid #333333;
+  }
+}
+
+/* =====================================================================
+   LIVE GEMINI 1.5 PRO STREAMING AUDIT & TYPING EFFECT
+   ===================================================================== */
+.live-gemini-stream-box {
+  margin-top: 14px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: #050505;
+  border: 1px solid #1a3a2a;
+  border-left: 3px solid var(--green, #00ff88);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.stream-box-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--green, #00ff88);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.live-pulse-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--green, #00ff88);
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(0, 255, 136, 0.8);
+  animation: pulseGreen 1.4s infinite;
+}
+
+@keyframes pulseGreen {
+  0% { transform: scale(0.9); opacity: 0.7; }
+  50% { transform: scale(1.3); opacity: 1; }
+  100% { transform: scale(0.9); opacity: 0.7; }
+}
+
+.stream-badge {
+  margin-left: auto;
+  font-size: 9px;
+  background: rgba(0, 255, 136, 0.15);
+  color: var(--green, #00ff88);
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.ast-progress-line {
+  color: #94a3b8;
+  margin-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.stream-reasoning-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #e2e8f0;
+  line-height: 1.5;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.streaming-cursor {
+  display: inline-block;
+  color: var(--green, #00ff88);
+  font-weight: bold;
+  animation: blinkCursor 0.8s infinite;
+}
+
+@keyframes blinkCursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}

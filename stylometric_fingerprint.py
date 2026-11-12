@@ -130,6 +130,75 @@ def extract_code_stylometrics(workspace_dir: str) -> dict:
     }
 
 
+def extract_in_memory_code_stylometrics(files_dict: dict[str, str]) -> dict:
+    """
+    Extracts AST sequences and naming habits directly from in-memory file strings
+    without touching the local disk.
+    """
+    ast_node_types: list[str] = []
+    identifiers: list[str] = []
+    function_names: list[str] = []
+    class_names: list[str] = []
+    code_snippets: list[str] = []
+
+    for fname, source in files_dict.items():
+        lower = fname.lower()
+        if lower.endswith(".py"):
+            try:
+                tree = ast.parse(source)
+                for node in ast.walk(tree):
+                    node_name = type(node).__name__
+                    ast_node_types.append(node_name)
+                    if isinstance(node, ast.Name):
+                        identifiers.append(node.id)
+                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        function_names.append(node.name)
+                    elif isinstance(node, ast.ClassDef):
+                        class_names.append(node.name)
+                    elif isinstance(node, ast.arg):
+                        identifiers.append(node.arg)
+                if len(code_snippets) < 3 and len(source) > 60:
+                    code_snippets.append(source[:1200])
+            except Exception:
+                continue
+        elif lower.endswith((".js", ".jsx", ".ts", ".tsx")):
+            matches = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", source)
+            identifiers.extend(matches)
+            ast_node_types.extend(re.findall(r"(?:function|class|const|let|var|if|for|while|return|import)", source))
+            if len(code_snippets) < 3 and len(source) > 60:
+                code_snippets.append(source[:1200])
+
+    filtered_ids = [
+        ident for ident in identifiers
+        if ident.lower() not in COMMON_RESERVED_WORDS and len(ident) > 1
+    ]
+    snake_case_count = sum(1 for i in filtered_ids if "_" in i and i.islower())
+    camel_case_count = sum(1 for i in filtered_ids if re.match(r"^[a-z]+[A-Z0-9]", i))
+    pascal_case_count = sum(1 for i in filtered_ids if re.match(r"^[A-Z][a-z0-9]+[A-Z]", i))
+    total_distinctive = max(1, len(filtered_ids))
+    avg_len = round(sum(len(i) for i in filtered_ids) / total_distinctive, 2)
+    ast_seq_str = "-".join(ast_node_types[:300]) if ast_node_types else "generic-code-structure"
+    ast_hash = hashlib.sha256(ast_seq_str.encode("utf-8")).hexdigest()
+    id_counts = Counter(filtered_ids)
+    top_identifiers = [name for name, _ in id_counts.most_common(40)]
+    naming_style = {
+        "snake_case_count": snake_case_count,
+        "camel_case_count": camel_case_count,
+        "pascal_case_count": pascal_case_count,
+        "snake_to_camel_ratio": round(snake_case_count / max(1, camel_case_count), 2),
+        "avg_identifier_length": avg_len,
+        "total_identifiers_analyzed": len(filtered_ids),
+    }
+    code_sample = "\n\n--- FILE SNIPPET ---\n\n".join(code_snippets[:2]) if code_snippets else "No source code read"
+    return {
+        "ast_hash": ast_hash,
+        "ast_nodes_count": len(ast_node_types),
+        "naming_style": naming_style,
+        "identifiers": top_identifiers,
+        "code_summary": code_sample,
+    }
+
+
 def evaluate_sybil_stylometric_fingerprint(
     workspace_dir: str | None = None,
     freelancer_email: str = "",
@@ -137,6 +206,7 @@ def evaluate_sybil_stylometric_fingerprint(
     milestone_id: int = 0,
     github_url: str | None = None,
     db: Session | None = None,
+    in_memory_files: dict[str, str] | None = None,
 ) -> dict:
     """
     Sybil Attack Detection:
@@ -150,31 +220,34 @@ def evaluate_sybil_stylometric_fingerprint(
     if db is None:
         return {"is_sybil_match": False, "message": "No database session provided"}
 
-    target_dir = workspace_dir
-    temp_dir_obj = None
+    if in_memory_files:
+        current_fp = extract_in_memory_code_stylometrics(in_memory_files)
+    else:
+        target_dir = workspace_dir
+        temp_dir_obj = None
 
-    if not target_dir or not os.path.exists(target_dir):
-        temp_dir_obj = tempfile.TemporaryDirectory()
-        target_dir = temp_dir_obj.name
-        if github_url:
-            try:
-                subprocess.run(
-                    ["git", "clone", "--depth", "1", github_url, target_dir],
-                    capture_output=True,
-                    timeout=30,
-                    text=True,
-                )
-            except Exception as clone_err:
-                print(f"[Stylometrics] Git clone notice: {clone_err}")
+        if not target_dir or not os.path.exists(target_dir):
+            temp_dir_obj = tempfile.TemporaryDirectory()
+            target_dir = temp_dir_obj.name
+            if github_url:
+                try:
+                    subprocess.run(
+                        ["git", "clone", "--depth", "1", github_url, target_dir],
+                        capture_output=True,
+                        timeout=30,
+                        text=True,
+                    )
+                except Exception as clone_err:
+                    print(f"[Stylometrics] Git clone notice: {clone_err}")
 
-    try:
-        current_fp = extract_code_stylometrics(target_dir)
-    finally:
-        if temp_dir_obj:
-            try:
-                temp_dir_obj.cleanup()
-            except Exception:
-                pass
+        try:
+            current_fp = extract_code_stylometrics(target_dir)
+        finally:
+            if temp_dir_obj:
+                try:
+                    temp_dir_obj.cleanup()
+                except Exception:
+                    pass
 
     current_clean_email = (freelancer_email or "").strip().lower()
 

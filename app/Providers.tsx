@@ -2,6 +2,7 @@
 
 import React from "react";
 import { PayPalScriptProvider } from "@paypal/react-paypal-js";
+import { AuthProvider } from "@/src/AuthContext";
 
 interface ProvidersProps {
   children: React.ReactNode;
@@ -20,7 +21,7 @@ export default function Providers({ children }: ProvidersProps) {
 
   return (
     <PayPalScriptProvider options={initialOptions}>
-      {children}
+      <AuthProvider>{children}</AuthProvider>
     </PayPalScriptProvider>
   );
 }
